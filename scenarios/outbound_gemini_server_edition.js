@@ -35,6 +35,10 @@ const WEBSOCKET_PRICE_PER_MINUTE_RUB = 0.5;
 const WS_RECONNECT_DELAY_MS = 1200;
 const WS_RECONNECT_MAX_ATTEMPTS = 1;
 const CALL_RECORD_ENABLED = true;
+const FORCE_OPENING_GREETING = true;
+const OPENING_GREETING_INPUT_UNLOCK_FALLBACK_MS = 7000;
+const OPENING_GREETING_TEXT =
+    'Здравствуйте! Меня зовут Екатерина. Вы оставляли заявку после мероприятия по внедрению AI в бизнес. Я как раз голосовой AI-помощник, то есть сейчас вы слышите пример такой технологии в работе. Вам удобно пару минут поговорить?';
 
 const AI_PRICE_IN_TEXT = 0.5;
 const AI_PRICE_IN_AUDIO = 3.0;
@@ -554,6 +558,12 @@ VoxEngine.addEventListener(AppEvents.Started, async () => {
             done: false,
             reconnectAttempts: 0,
             reconnectTimer: null,
+            geminiWarmupStarted: false,
+            geminiReady: false,
+            geminiOutputConnected: false,
+            callerInputConnected: false,
+            openingGreetingDone: false,
+            openingUnlockTimer: null,
             startPromptSent: false,
             usageStats: {
                 in_text: 0,
@@ -762,6 +772,7 @@ VoxEngine.addEventListener(AppEvents.Started, async () => {
             callTimeoutTimer = clearTimer(callTimeoutTimer);
             summaryWaitTimer = clearTimer(summaryWaitTimer);
             session.reconnectTimer = clearTimer(session.reconnectTimer);
+            session.openingUnlockTimer = clearTimer(session.openingUnlockTimer);
 
             if (session.websocketOpenedAtMs && !session.websocketDurationSec) {
                 session.websocketDurationSec = (Date.now() - session.websocketOpenedAtMs) / 1000;
@@ -884,6 +895,113 @@ VoxEngine.addEventListener(AppEvents.Started, async () => {
             }, WS_RECONNECT_DELAY_MS);
         };
 
+        const enableCallerInputToGemini = (reason) => {
+            if (session.done || finishingCurrentCall || !activeCall || !activeGeminiClient) return;
+            if (session.callerInputConnected) return;
+
+            try {
+                activeCall.sendMediaTo(activeGeminiClient);
+                session.callerInputConnected = true;
+                session.openingGreetingDone = true;
+                session.openingUnlockTimer = clearTimer(session.openingUnlockTimer);
+                Logger.write(`===CALLER_INPUT_CONNECTED:${reason}===`);
+            } catch (e) {
+                Logger.write('===CALLER_INPUT_CONNECT_ERROR===');
+                Logger.write(String(e));
+                try {
+                    VoxEngine.sendMediaBetween(activeCall, activeGeminiClient);
+                    session.geminiOutputConnected = true;
+                    session.callerInputConnected = true;
+                    session.openingGreetingDone = true;
+                    session.openingUnlockTimer = clearTimer(session.openingUnlockTimer);
+                    Logger.write(`===FULL_MEDIA_BRIDGE_FALLBACK:${reason}===`);
+                } catch (fallbackError) {
+                    Logger.write('===FULL_MEDIA_BRIDGE_FALLBACK_ERROR===');
+                    Logger.write(String(fallbackError));
+                }
+            }
+        };
+
+        const connectGeminiOutputToCall = (client, reason) => {
+            if (session.done || finishingCurrentCall || !activeCall || !client) return false;
+            if (session.geminiOutputConnected) return true;
+
+            try {
+                client.sendMediaTo(activeCall);
+                session.geminiOutputConnected = true;
+                Logger.write(`===GEMINI_OUTPUT_CONNECTED:${reason}===`);
+                return true;
+            } catch (e) {
+                Logger.write('===GEMINI_OUTPUT_CONNECT_ERROR===');
+                Logger.write(String(e));
+                try {
+                    VoxEngine.sendMediaBetween(activeCall, client);
+                    session.geminiOutputConnected = true;
+                    session.callerInputConnected = true;
+                    Logger.write(`===FULL_MEDIA_BRIDGE_FALLBACK:${reason}===`);
+                    return true;
+                } catch (fallbackError) {
+                    Logger.write('===FULL_MEDIA_BRIDGE_FALLBACK_ERROR===');
+                    Logger.write(String(fallbackError));
+                    return false;
+                }
+            }
+        };
+
+        const sendOpeningGreeting = (client, reason) => {
+            if (session.done || finishingCurrentCall || !session.callConnected || !client) return;
+            if (session.startPromptSent) return;
+
+            connectGeminiOutputToCall(client, reason);
+
+            const promptText = FORCE_OPENING_GREETING
+                ? `Сейчас абонент только что поднял трубку. Не жди его реплики и не реагируй на возможные первые "алло". Сразу, дословно и одним сообщением произнеси приветствие: "${OPENING_GREETING_TEXT}"`
+                : 'Начни исходящий звонок коротким приветствием и вопросом, удобно ли сейчас говорить.';
+
+            sendUserTextToModel(client, promptText, 'opening_greeting');
+            session.startPromptSent = true;
+            Logger.write(`===OPENING_GREETING_SENT:${reason}===`);
+
+            session.openingUnlockTimer = setTimeout(() => {
+                Logger.write('===OPENING_GREETING_UNLOCK_FALLBACK===');
+                enableCallerInputToGemini('opening_fallback_timeout');
+            }, OPENING_GREETING_INPUT_UNLOCK_FALLBACK_MS);
+        };
+
+        const maybeStartOpeningGreeting = (reason) => {
+            if (!session.callConnected || !session.geminiReady || !activeGeminiClient) return;
+            if (session.startPromptSent) return;
+            sendOpeningGreeting(activeGeminiClient, reason);
+        };
+
+        const connectFullMediaAfterReconnect = (client) => {
+            if (!session.callConnected || !client || !activeCall) return;
+            try {
+                VoxEngine.sendMediaBetween(activeCall, client);
+                session.geminiOutputConnected = true;
+                session.callerInputConnected = true;
+                Logger.write('===FULL_MEDIA_BRIDGE_CONNECTED:reconnect===');
+            } catch (e) {
+                Logger.write('===FULL_MEDIA_BRIDGE_RECONNECT_ERROR===');
+                Logger.write(String(e));
+            }
+        };
+
+        const startGeminiWarmup = async (reason) => {
+            if (session.geminiWarmupStarted || activeGeminiClient) return;
+            session.geminiWarmupStarted = true;
+            Logger.write(`===GEMINI_WARMUP_START:${reason}===`);
+            try {
+                activeGeminiClient = await createGeminiClient();
+                Logger.write(`===GEMINI_WARMUP_DONE:${reason}===`);
+                maybeStartOpeningGreeting(`${reason}_warmup_done`);
+            } catch (e) {
+                Logger.write('===GEMINI_CREATE_ERROR===');
+                Logger.write(String(e));
+                if (session.callConnected) finishAndContinue('gemini_create_error', true);
+            }
+        };
+
         const createGeminiClient = async () => {
             const apiKeyEntry = await ApplicationStorage.get('GEMINI_API_KEY');
             const apiKey = apiKeyEntry && apiKeyEntry.value;
@@ -961,17 +1079,18 @@ VoxEngine.addEventListener(AppEvents.Started, async () => {
 
             client.addEventListener(Gemini.LiveAPIEvents.SetupComplete, () => {
                 Logger.write('===GEMINI_SETUP_COMPLETE===');
-                VoxEngine.sendMediaBetween(activeCall, client);
-                const promptText = session.startPromptSent
-                    ? 'Соединение восстановлено. Продолжай разговор естественно с того места, где остановились. Не здоровайся заново.'
-                    : 'Начни исходящий звонок. Скажи: "Здравствуйте! Меня зовут Екатерина. Вы оставляли заявку после мероприятия по внедрению AI в бизнес. Я как раз голосовой AI-помощник, то есть сейчас вы слышите пример такой технологии в работе. Вам удобно пару минут поговорить?"';
-                sendUserTextToModel(
-                    client,
-                    promptText,
-                    'start_prompt'
-                );
-                session.startPromptSent = true;
-                Logger.write('===START_PROMPT_SENT===');
+                session.geminiReady = true;
+                if (session.startPromptSent) {
+                    connectFullMediaAfterReconnect(client);
+                    sendUserTextToModel(
+                        client,
+                        'Соединение восстановлено. Продолжай разговор естественно с того места, где остановились. Не здоровайся заново.',
+                        'reconnect_prompt'
+                    );
+                    Logger.write('===RECONNECT_PROMPT_SENT===');
+                    return;
+                }
+                maybeStartOpeningGreeting('setup_complete');
             });
 
             client.addEventListener(Gemini.LiveAPIEvents.ToolCall, (event) => {
@@ -1051,6 +1170,10 @@ VoxEngine.addEventListener(AppEvents.Started, async () => {
                 if (payload.turnComplete === true && session.currentAssistantParts.length) {
                     finalizePhrase('assistant', session.currentAssistantParts, 'complete');
                 }
+
+                if (payload.turnComplete === true && session.startPromptSent && !session.callerInputConnected) {
+                    enableCallerInputToGemini('opening_turn_complete');
+                }
             });
 
             client.addEventListener(Gemini.LiveAPIEvents.Unknown, (event) => {
@@ -1064,6 +1187,7 @@ VoxEngine.addEventListener(AppEvents.Started, async () => {
 
         Logger.write(`===OUTBOUND_DIAL_START:${targetPhone}===`);
         activeCall = VoxEngine.callPSTN(targetPhone, callerId);
+        startGeminiWarmup('after_dial');
         try {
             if (activeCall && activeCall.id) session.sessionId = safeString(activeCall.id());
         } catch (e) {
@@ -1117,13 +1241,8 @@ VoxEngine.addEventListener(AppEvents.Started, async () => {
                 }
             }
 
-            try {
-                activeGeminiClient = await createGeminiClient();
-            } catch (e) {
-                Logger.write('===GEMINI_CREATE_ERROR===');
-                Logger.write(String(e));
-                finishAndContinue('gemini_create_error', true);
-            }
+            maybeStartOpeningGreeting('call_connected');
+            startGeminiWarmup('call_connected');
         });
 
         activeCall.addEventListener(CallEvents.RecordStarted, (event) => {
