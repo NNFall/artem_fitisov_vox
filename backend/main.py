@@ -1,31 +1,36 @@
 import asyncio
+import csv
+import io
 import json
 import logging
 import os
 import re
 import time
 from contextlib import asynccontextmanager
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Optional
 from urllib.parse import urlparse
 
 import aiohttp
-from aiogram import Bot
+from aiogram import Bot, Dispatcher, F
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
+from aiogram.filters import Command
+from aiogram.types import Message
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from dotenv import load_dotenv
 from fastapi import Depends, FastAPI, HTTPException, Path as ApiPath, Query, Request
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
-from database import Call, SessionLocal
+from database import Call, Campaign, OutboundContact, OutboundTask, SessionLocal
 from voximplant.apiclient import VoximplantAPI
 
 BASE_DIR = Path(__file__).resolve().parent
 LOG_PATH = BASE_DIR / "backend.log"
 RECORDINGS_DIR = BASE_DIR / "recordings"
+IMPORTS_DIR = BASE_DIR / "imports"
 
 logging.basicConfig(
     level=logging.INFO,
@@ -40,8 +45,15 @@ PROJECT_NAME = "artem_fitisov"
 BACKEND_WEBHOOK_SECRET = os.getenv("BACKEND_WEBHOOK_SECRET", "").strip()
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
 TELEGRAM_ADMIN_CHAT_ID = os.getenv("TELEGRAM_ADMIN_CHAT_ID", "").strip()
+TELEGRAM_ADMIN_IDS_STR = os.getenv("TELEGRAM_ADMIN_IDS", "")
 TELEGRAM_USER_CHAT_IDS_STR = os.getenv("TELEGRAM_USER_CHAT_IDS", "")
 GOOGLE_APPS_SCRIPT_WEBHOOK_URL = os.getenv("GOOGLE_APPS_SCRIPT_WEBHOOK_URL", "").strip()
+PUBLIC_BACKEND_URL = os.getenv("PUBLIC_BACKEND_URL", "").strip().rstrip("/")
+VOXIMPLANT_RULE_ID = os.getenv("VOXIMPLANT_RULE_ID", "").strip()
+OUTBOUND_WORKER_ENABLED = os.getenv("OUTBOUND_WORKER_ENABLED", "true").lower() not in {"0", "false", "no", "off"}
+OUTBOUND_WORKER_INTERVAL_SECONDS = max(5, int(os.getenv("OUTBOUND_WORKER_INTERVAL_SECONDS", "15")))
+OUTBOUND_MAX_CONCURRENT_CALLS = max(1, int(os.getenv("OUTBOUND_MAX_CONCURRENT_CALLS", "1")))
+OUTBOUND_RETRY_DELAY_MINUTES = max(1, int(os.getenv("OUTBOUND_RETRY_DELAY_MINUTES", "30")))
 RECORDINGS_TTL_DAYS = int(os.getenv("RECORDINGS_TTL_DAYS", "30"))
 CLEANUP_INTERVAL_HOURS = int(os.getenv("CLEANUP_INTERVAL_HOURS", "24"))
 DELIVERY_RETRY_ATTEMPTS = max(1, int(os.getenv("DELIVERY_RETRY_ATTEMPTS", "3")))
@@ -51,6 +63,7 @@ DOWNLOAD_RETRY_DELAY_MS = max(100, int(os.getenv("DOWNLOAD_RETRY_DELAY_MS", "120
 VOXIMPLANT_CREDENTIALS_FILE_PATH = os.getenv("VOXIMPLANT_CREDENTIALS_FILE_PATH", "").strip()
 
 RECORDINGS_DIR.mkdir(parents=True, exist_ok=True)
+IMPORTS_DIR.mkdir(parents=True, exist_ok=True)
 
 bot: Optional[Bot] = None
 if TELEGRAM_BOT_TOKEN:
@@ -62,6 +75,8 @@ else:
     logger.warning("TELEGRAM_BOT_TOKEN is not configured. Telegram delivery is disabled.")
 
 scheduler = AsyncIOScheduler()
+dispatcher: Optional[Dispatcher] = None
+telegram_polling_task: Optional[asyncio.Task] = None
 voximplant_api_client: Optional[VoximplantAPI] = None
 
 if VOXIMPLANT_CREDENTIALS_FILE_PATH:
@@ -76,6 +91,8 @@ class CallStartedPayload(BaseModel):
     session_id: str
     project: str = PROJECT_NAME
     script_name: Optional[str] = None
+    outbound_task_id: Optional[int] = None
+    campaign_id: Optional[int] = None
     caller_phone: Optional[str] = None
     connected_at_utc: Optional[str] = None
 
@@ -92,6 +109,8 @@ class RecordingReadyPayload(BaseModel):
     session_id: str
     project: str = PROJECT_NAME
     script_name: Optional[str] = None
+    outbound_task_id: Optional[int] = None
+    campaign_id: Optional[int] = None
     recording_url: str
     recording_status: Optional[str] = None
     recording_error: Optional[str] = None
@@ -107,6 +126,8 @@ class FinalizePayload(BaseModel):
     session_id: str
     project: str = PROJECT_NAME
     script_name: Optional[str] = None
+    outbound_task_id: Optional[int] = None
+    campaign_id: Optional[int] = None
     exported_at_utc: Optional[str] = None
     finalization_reason: Optional[str] = None
     model: Optional[str] = None
@@ -195,6 +216,31 @@ def normalize_chat_ids(raw_value: str) -> list[str]:
     return [item.strip() for item in normalized.split(",") if item.strip()]
 
 
+def get_admin_ids() -> set[str]:
+    return set(normalize_chat_ids(",".join([TELEGRAM_ADMIN_CHAT_ID, TELEGRAM_ADMIN_IDS_STR])))
+
+
+def is_admin_chat(chat_id: Any) -> bool:
+    admin_ids = get_admin_ids()
+    return bool(admin_ids) and safe_text(chat_id) in admin_ids
+
+
+PHONE_RE = re.compile(r"[^\d+]")
+
+
+def normalize_phone(value: Any) -> str:
+    phone = PHONE_RE.sub("", safe_text(value)).strip()
+    if phone.startswith("+"):
+        phone = phone[1:]
+    if phone.startswith("8") and len(phone) == 11:
+        phone = "7" + phone[1:]
+    return phone
+
+
+def normalize_header(value: Any) -> str:
+    return safe_text(value).strip().lower().replace("ё", "е")
+
+
 def dedupe(items: list[str]) -> list[str]:
     seen: set[str] = set()
     result: list[str] = []
@@ -215,7 +261,7 @@ async def wait_before_retry(base_delay_ms: int, attempt: int):
 
 
 def get_admin_chat_ids() -> list[str]:
-    return normalize_chat_ids(TELEGRAM_ADMIN_CHAT_ID)
+    return dedupe(normalize_chat_ids(",".join([TELEGRAM_ADMIN_CHAT_ID, TELEGRAM_ADMIN_IDS_STR])))
 
 
 def get_summary_chat_ids() -> list[str]:
@@ -274,6 +320,127 @@ def is_diagnostic_finalize(payload: "FinalizePayload") -> bool:
 DEFAULT_NOT_SPECIFIED = "\u043d\u0435 \u0443\u043a\u0430\u0437\u0430\u043d\u043e"
 DEFAULT_UNKNOWN = "\u043d\u0435\u0438\u0437\u0432\u0435\u0441\u0442\u043d\u043e"
 DEFAULT_NO_DIALOGUE = "\u0420\u0435\u043f\u043b\u0438\u043a\u0438 \u043d\u0435 \u043d\u0430\u0439\u0434\u0435\u043d\u044b."
+
+
+COLUMN_ALIASES = {
+    "phone": {"phone", "tel", "telephone", "номер", "телефон", "номер телефона", "phone_number"},
+    "name": {"name", "client_name", "имя", "клиент", "фио", "контакт"},
+    "company": {"company", "компания", "организация", "бизнес"},
+    "city": {"city", "город"},
+    "source": {"source", "источник", "мероприятие", "event"},
+    "task": {"task", "задача", "интерес", "need", "потребность"},
+    "context": {"context", "prompt_context", "контекст", "комментарий", "comment", "info", "доп информация"},
+    "preferred_time": {"preferred_time", "удобное время", "time", "время"},
+    "timezone": {"timezone", "tz", "часовой пояс"},
+    "call_after": {"call_after", "scheduled_at", "когда звонить", "дата звонка"},
+    "max_attempts": {"max_attempts", "попытки", "количество попыток"},
+    "campaign_context": {"campaign_context", "общий контекст", "общая информация", "global_context"},
+}
+
+
+def canonical_column(header: Any) -> str:
+    normalized = normalize_header(header)
+    for canonical, aliases in COLUMN_ALIASES.items():
+        if normalized in aliases:
+            return canonical
+    return normalized
+
+
+def parse_datetime_maybe(value: Any) -> Optional[datetime]:
+    text = safe_text(value).strip()
+    if not text:
+        return None
+    parsed = parse_iso_datetime(text)
+    if parsed:
+        return parsed
+    for fmt in ("%d.%m.%Y %H:%M", "%d.%m.%Y", "%Y-%m-%d %H:%M", "%Y-%m-%d"):
+        try:
+            return datetime.strptime(text, fmt)
+        except ValueError:
+            continue
+    return None
+
+
+def read_csv_rows(content: bytes, suffix: str) -> list[dict[str, Any]]:
+    text = content.decode("utf-8-sig", errors="replace")
+    sample = text[:4096]
+    if suffix == ".tsv":
+        delimiter = "\t"
+    else:
+        try:
+            delimiter = csv.Sniffer().sniff(sample, delimiters=",;\t").delimiter
+        except csv.Error:
+            delimiter = ";"
+    reader = csv.DictReader(io.StringIO(text), delimiter=delimiter)
+    return [dict(row) for row in reader if any(safe_text(v).strip() for v in row.values())]
+
+
+def read_xlsx_rows(content: bytes) -> list[dict[str, Any]]:
+    from openpyxl import load_workbook
+
+    workbook = load_workbook(io.BytesIO(content), read_only=True, data_only=True)
+    sheet = workbook.active
+    rows = list(sheet.iter_rows(values_only=True))
+    if not rows:
+        return []
+    headers = [safe_text(cell).strip() for cell in rows[0]]
+    result: list[dict[str, Any]] = []
+    for row in rows[1:]:
+        item = {headers[i]: row[i] if i < len(row) else "" for i in range(len(headers)) if headers[i]}
+        if any(safe_text(v).strip() for v in item.values()):
+            result.append(item)
+    return result
+
+
+def normalize_import_rows(rows: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], str]:
+    normalized_rows: list[dict[str, Any]] = []
+    campaign_context = ""
+
+    for raw in rows:
+        item: dict[str, Any] = {}
+        raw_clean = {safe_text(k).strip(): v for k, v in raw.items() if safe_text(k).strip()}
+        for key, value in raw_clean.items():
+            item[canonical_column(key)] = safe_text(value).strip()
+
+        phone = normalize_phone(item.get("phone"))
+        if not phone:
+            continue
+        item["phone"] = phone
+
+        if item.get("campaign_context") and not campaign_context:
+            campaign_context = safe_text(item.get("campaign_context")).strip()
+
+        item["_raw"] = raw_clean
+        normalized_rows.append(item)
+
+    return normalized_rows, campaign_context
+
+
+def build_task_context(campaign: Campaign, contact: OutboundContact, task: OutboundTask) -> dict[str, Any]:
+    return {
+        "task_id": task.id,
+        "campaign_id": campaign.id,
+        "phone": contact.phone,
+        "client_name": contact.name or "",
+        "company": contact.company or "",
+        "city": contact.city or "",
+        "source": contact.source or "",
+        "task": contact.task or "",
+        "context": contact.context or "",
+        "preferred_time": contact.preferred_time or "",
+        "timezone": contact.timezone or "",
+        "campaign_context": campaign.prompt_context or "",
+    }
+
+
+def get_campaign_stats(db: Session, campaign_id: int) -> dict[str, int]:
+    rows = db.query(OutboundTask.status, OutboundTask.id).filter(OutboundTask.campaign_id == campaign_id).all()
+    stats: dict[str, int] = {}
+    for status, _ in rows:
+        stats[status or "unknown"] = stats.get(status or "unknown", 0) + 1
+    stats["total"] = len(rows)
+    return stats
+
 
 def render_admin_report(payload: FinalizePayload) -> str:
     usage_text = safe_text(payload.usage).strip() or "{}"
@@ -496,6 +663,11 @@ async def cleanup_old_recordings():
 def fill_call_from_finalize(db_call: Call, payload: FinalizePayload):
     now = datetime.utcnow()
 
+    if payload.outbound_task_id:
+        db_call.outbound_task_id = payload.outbound_task_id
+    if payload.campaign_id:
+        db_call.campaign_id = payload.campaign_id
+
     set_if_value(db_call, "project", payload.project)
     set_if_value(db_call, "script_name", payload.script_name)
     set_if_value(db_call, "model", payload.model)
@@ -542,13 +714,398 @@ def fill_call_from_finalize(db_call: Call, payload: FinalizePayload):
     db_call.raw_payload_json = to_json_text(payload.model_dump(mode="json"))
 
 
+def update_outbound_task_from_finalize(db: Session, payload: FinalizePayload):
+    if not payload.outbound_task_id:
+        return
+
+    task = db.query(OutboundTask).filter(OutboundTask.id == payload.outbound_task_id).first()
+    if not task:
+        return
+
+    now = datetime.utcnow()
+    task.voximplant_session_id = payload.session_id
+    task.result_status = payload.outcome or payload.finalization_reason or "finalized"
+    task.result_summary = payload.summary
+    task.updated_at = now
+
+    retry_reasons = {"call_failed", "call_timeout", "no_gemini_key", "gemini_create_error"}
+    if safe_text(payload.finalization_reason) in retry_reasons and (task.attempt_count or 0) < (task.max_attempts or 1):
+        retry_at = now + timedelta(minutes=OUTBOUND_RETRY_DELAY_MINUTES)
+        task.status = "pending"
+        task.next_attempt_at = retry_at
+        task.scheduled_at = retry_at
+        task.last_error = payload.finalization_reason
+        return
+
+    task.status = "completed"
+    task.finished_at = now
+    task.last_error = None
+
+
+async def start_outbound_task(task_id: int):
+    if not voximplant_api_client:
+        logger.warning("Outbound worker skipped: Voximplant credentials are not configured")
+        return
+    if not VOXIMPLANT_RULE_ID:
+        logger.warning("Outbound worker skipped: VOXIMPLANT_RULE_ID is not configured")
+        return
+
+    db = SessionLocal()
+    try:
+        task = db.query(OutboundTask).filter(OutboundTask.id == task_id).first()
+        if not task or task.status not in {"pending", "scheduled"}:
+            return
+        campaign = db.query(Campaign).filter(Campaign.id == task.campaign_id).first()
+        if not campaign or campaign.status != "active":
+            return
+
+        now = datetime.utcnow()
+        task.status = "starting"
+        task.attempt_count = (task.attempt_count or 0) + 1
+        task.last_attempt_at = now
+        task.updated_at = now
+        db.commit()
+
+        custom_data = json.dumps({"task_id": task.id}, ensure_ascii=False)
+        result = await asyncio.to_thread(
+            voximplant_api_client.start_scenarios,
+            rule_id=int(VOXIMPLANT_RULE_ID),
+            script_custom_data=custom_data,
+        )
+
+        task.start_result_json = to_json_text(result)
+        task.status = "started"
+        task.started_at = now
+        task.voximplant_session_id = safe_text(result.get("call_session_history_id") or "")
+        task.updated_at = datetime.utcnow()
+        db.commit()
+        logger.info("Started outbound task id=%s phone=%s", task.id, task.phone)
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("Failed to start outbound task id=%s", task_id)
+        task = db.query(OutboundTask).filter(OutboundTask.id == task_id).first()
+        if task:
+            task.last_error = str(exc)
+            retry_at = datetime.utcnow() + timedelta(minutes=OUTBOUND_RETRY_DELAY_MINUTES)
+            task.status = "pending" if (task.attempt_count or 0) < (task.max_attempts or 1) else "failed"
+            task.next_attempt_at = retry_at
+            task.scheduled_at = task.next_attempt_at
+            task.updated_at = datetime.utcnow()
+            db.commit()
+    finally:
+        db.close()
+
+
+async def process_outbound_queue():
+    if not OUTBOUND_WORKER_ENABLED:
+        return
+
+    db = SessionLocal()
+    try:
+        active_count = (
+            db.query(OutboundTask)
+            .filter(OutboundTask.status.in_(["starting", "started", "in_progress"]))
+            .count()
+        )
+        free_slots = OUTBOUND_MAX_CONCURRENT_CALLS - active_count
+        if free_slots <= 0:
+            return
+
+        now = datetime.utcnow()
+        tasks = (
+            db.query(OutboundTask)
+            .join(Campaign, Campaign.id == OutboundTask.campaign_id)
+            .filter(Campaign.status == "active")
+            .filter(OutboundTask.status.in_(["pending", "scheduled"]))
+            .filter(OutboundTask.scheduled_at <= now)
+            .order_by(OutboundTask.priority.asc(), OutboundTask.scheduled_at.asc(), OutboundTask.id.asc())
+            .limit(free_slots)
+            .all()
+        )
+        task_ids = [task.id for task in tasks]
+    finally:
+        db.close()
+
+    for task_id in task_ids:
+        await start_outbound_task(task_id)
+
+
+async def create_campaign_from_rows(
+    db: Session,
+    rows: list[dict[str, Any]],
+    source_filename: str,
+    admin_chat_id: str,
+    campaign_context: str = "",
+) -> Campaign:
+    campaign = Campaign(
+        name=f"{Path(source_filename).stem} {datetime.utcnow().strftime('%Y-%m-%d %H:%M')}",
+        status="paused",
+        source_filename=source_filename,
+        prompt_context=campaign_context,
+        default_max_attempts=1,
+        created_by_chat_id=admin_chat_id,
+        created_at=datetime.utcnow(),
+        updated_at=datetime.utcnow(),
+    )
+    db.add(campaign)
+    db.flush()
+
+    for idx, row in enumerate(rows, start=1):
+        max_attempts = safe_int(row.get("max_attempts")) or campaign.default_max_attempts or 1
+        scheduled_at = parse_datetime_maybe(row.get("call_after")) or datetime.utcnow()
+        contact = OutboundContact(
+            campaign_id=campaign.id,
+            phone=row["phone"],
+            name=safe_text(row.get("name")).strip() or None,
+            company=safe_text(row.get("company")).strip() or None,
+            city=safe_text(row.get("city")).strip() or None,
+            source=safe_text(row.get("source")).strip() or None,
+            task=safe_text(row.get("task")).strip() or None,
+            context=safe_text(row.get("context")).strip() or None,
+            preferred_time=safe_text(row.get("preferred_time")).strip() or None,
+            timezone=safe_text(row.get("timezone")).strip() or None,
+            raw_row_json=to_json_text(row.get("_raw")),
+            created_at=datetime.utcnow(),
+            updated_at=datetime.utcnow(),
+        )
+        db.add(contact)
+        db.flush()
+
+        db.add(
+            OutboundTask(
+                campaign_id=campaign.id,
+                contact_id=contact.id,
+                phone=contact.phone,
+                status="pending",
+                priority=100 + idx,
+                scheduled_at=scheduled_at,
+                attempt_count=0,
+                max_attempts=max_attempts,
+                created_at=datetime.utcnow(),
+                updated_at=datetime.utcnow(),
+            )
+        )
+
+    db.commit()
+    db.refresh(campaign)
+    return campaign
+
+
+def admin_only(handler):
+    async def wrapper(message: Message):
+        if not is_admin_chat(message.chat.id):
+            await message.answer("Доступ закрыт.")
+            return
+        await handler(message)
+
+    return wrapper
+
+
+async def tg_help(message: Message):
+    text = (
+        "<b>Управление обзвоном</b>\n\n"
+        "/status - состояние backend и очереди\n"
+        "/campaigns - список кампаний\n"
+        "/run ID - запустить кампанию\n"
+        "/pause ID - поставить кампанию на паузу\n"
+        "/calls - последние звонки\n"
+        "/template - формат файла для загрузки\n\n"
+        "Для загрузки базы отправьте CSV, TSV или XLSX файл. Обязательная колонка: phone."
+    )
+    await message.answer(text)
+
+
+async def tg_status(message: Message):
+    db = SessionLocal()
+    try:
+        campaigns = db.query(Campaign).count()
+        contacts = db.query(OutboundContact).count()
+        tasks_total = db.query(OutboundTask).count()
+        pending = db.query(OutboundTask).filter(OutboundTask.status.in_(["pending", "scheduled"])).count()
+        active = db.query(OutboundTask).filter(OutboundTask.status.in_(["starting", "started", "in_progress"])).count()
+        completed = db.query(OutboundTask).filter(OutboundTask.status == "completed").count()
+        failed = db.query(OutboundTask).filter(OutboundTask.status == "failed").count()
+    finally:
+        db.close()
+
+    await message.answer(
+        "\n".join(
+            [
+                "<b>Статус</b>",
+                f"Кампаний: {campaigns}",
+                f"Контактов: {contacts}",
+                f"Задач: {tasks_total}",
+                f"В очереди: {pending}",
+                f"В работе: {active}",
+                f"Завершено: {completed}",
+                f"Ошибок: {failed}",
+                f"Worker: {'включен' if OUTBOUND_WORKER_ENABLED else 'выключен'}",
+                f"Rule ID: {VOXIMPLANT_RULE_ID or 'не задан'}",
+            ]
+        )
+    )
+
+
+async def tg_campaigns(message: Message):
+    db = SessionLocal()
+    try:
+        campaigns = db.query(Campaign).order_by(Campaign.id.desc()).limit(10).all()
+        if not campaigns:
+            await message.answer("Кампаний пока нет. Отправьте CSV/TSV/XLSX файл с колонкой phone.")
+            return
+        lines = ["<b>Кампании</b>"]
+        for campaign in campaigns:
+            stats = get_campaign_stats(db, campaign.id)
+            lines.append(
+                f"#{campaign.id} {campaign.name} - {campaign.status}; "
+                f"total={stats.get('total', 0)}, pending={stats.get('pending', 0)}, "
+                f"active={stats.get('started', 0) + stats.get('starting', 0) + stats.get('in_progress', 0)}, "
+                f"done={stats.get('completed', 0)}, failed={stats.get('failed', 0)}"
+            )
+    finally:
+        db.close()
+    await message.answer("\n".join(lines))
+
+
+async def tg_run_or_pause(message: Message, status: str):
+    parts = safe_text(message.text).split()
+    if len(parts) < 2 or not parts[1].isdigit():
+        await message.answer("Укажите ID кампании, например: /run 1")
+        return
+    campaign_id = int(parts[1])
+    db = SessionLocal()
+    try:
+        campaign = db.query(Campaign).filter(Campaign.id == campaign_id).first()
+        if not campaign:
+            await message.answer(f"Кампания #{campaign_id} не найдена.")
+            return
+        campaign.status = status
+        campaign.updated_at = datetime.utcnow()
+        if status == "active":
+            campaign.started_at = datetime.utcnow()
+        else:
+            campaign.paused_at = datetime.utcnow()
+        db.commit()
+        stats = get_campaign_stats(db, campaign.id)
+    finally:
+        db.close()
+    await message.answer(f"Кампания #{campaign_id}: {status}. Задач: {stats.get('total', 0)}, в очереди: {stats.get('pending', 0)}.")
+
+
+async def tg_template(message: Message):
+    await message.answer(
+        "<b>Формат файла</b>\n\n"
+        "Обязательная колонка:\n"
+        "phone\n\n"
+        "Опциональные колонки:\n"
+        "name, company, city, source, task, context, preferred_time, timezone, call_after, max_attempts, campaign_context\n\n"
+        "Пример CSV:\n"
+        "<code>phone;name;company;task;context;preferred_time;campaign_context\n"
+        "79990000000;Иван;Ромашка;AI для входящих звонков;Есть заявки с сайта;после 16:00;Лиды после мероприятия</code>"
+    )
+
+
+async def tg_calls(message: Message):
+    db = SessionLocal()
+    try:
+        calls = db.query(Call).order_by(Call.id.desc()).limit(5).all()
+        if not calls:
+            await message.answer("Звонков пока нет.")
+            return
+        lines = ["<b>Последние звонки</b>"]
+        for call in calls:
+            lines.append(
+                f"#{call.id} {call.client_phone or call.caller_phone or '?'} - {call.status}; "
+                f"{display_or_default(call.summary, 'без summary')}"
+            )
+    finally:
+        db.close()
+    await message.answer("\n".join(lines))
+
+
+async def tg_document(message: Message):
+    document = message.document
+    if not document:
+        return
+    suffix = Path(document.file_name or "").suffix.lower()
+    if suffix not in {".csv", ".tsv", ".xlsx"}:
+        await message.answer("Поддерживаются файлы CSV, TSV и XLSX.")
+        return
+
+    file = await bot.get_file(document.file_id)  # type: ignore[union-attr]
+    buffer = io.BytesIO()
+    await bot.download_file(file.file_path, destination=buffer)  # type: ignore[union-attr]
+    content = buffer.getvalue()
+
+    saved_path = IMPORTS_DIR / f"{datetime.utcnow().strftime('%Y%m%d_%H%M%S')}_{document.file_name}"
+    saved_path.write_bytes(content)
+
+    try:
+        raw_rows = read_xlsx_rows(content) if suffix == ".xlsx" else read_csv_rows(content, suffix)
+        rows, campaign_context = normalize_import_rows(raw_rows)
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("Failed to parse uploaded file")
+        await message.answer(f"Не удалось разобрать файл: {exc}")
+        return
+
+    if not rows:
+        await message.answer("В файле не нашел строк с телефоном. Проверьте колонку phone/телефон.")
+        return
+
+    db = SessionLocal()
+    try:
+        campaign = await create_campaign_from_rows(
+            db,
+            rows=rows,
+            source_filename=document.file_name or saved_path.name,
+            admin_chat_id=safe_text(message.chat.id),
+            campaign_context=campaign_context,
+        )
+        stats = get_campaign_stats(db, campaign.id)
+    finally:
+        db.close()
+
+    await message.answer(
+        f"База загружена: кампания #{campaign.id}\n"
+        f"Контактов: {stats.get('total', 0)}\n"
+        f"Статус: paused\n\n"
+        f"Запуск: /run {campaign.id}"
+    )
+
+
+def setup_telegram_dispatcher():
+    global dispatcher
+    if bot is None:
+        return
+    dispatcher = Dispatcher()
+    dispatcher.message.register(admin_only(tg_help), Command("start", "help"))
+    dispatcher.message.register(admin_only(tg_status), Command("status"))
+    dispatcher.message.register(admin_only(tg_campaigns), Command("campaigns"))
+    dispatcher.message.register(admin_only(lambda message: tg_run_or_pause(message, "active")), Command("run"))
+    dispatcher.message.register(admin_only(lambda message: tg_run_or_pause(message, "paused")), Command("pause"))
+    dispatcher.message.register(admin_only(tg_template), Command("template"))
+    dispatcher.message.register(admin_only(tg_calls), Command("calls"))
+    dispatcher.message.register(admin_only(tg_document), F.document)
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    global telegram_polling_task
     logger.info("Artem Fitisov backend starting")
     scheduler.add_job(cleanup_old_recordings, "interval", hours=CLEANUP_INTERVAL_HOURS)
+    scheduler.add_job(process_outbound_queue, "interval", seconds=OUTBOUND_WORKER_INTERVAL_SECONDS)
     scheduler.start()
+    setup_telegram_dispatcher()
+    if dispatcher is not None and bot is not None:
+        telegram_polling_task = asyncio.create_task(dispatcher.start_polling(bot))
+        logger.info("Telegram bot polling started")
     yield
     logger.info("Artem Fitisov backend stopping")
+    if telegram_polling_task:
+        telegram_polling_task.cancel()
+        try:
+            await telegram_polling_task
+        except asyncio.CancelledError:
+            pass
     scheduler.shutdown()
     if bot is not None:
         await bot.session.close()
@@ -599,6 +1156,73 @@ def get_call(
     return db_call.as_dict()
 
 
+@app.get("/outbound/campaigns")
+def list_campaigns(
+    secret: str = Query(default=""),
+    db: Session = Depends(get_db),
+):
+    if not BACKEND_WEBHOOK_SECRET:
+        raise HTTPException(status_code=503, detail="admin api disabled")
+    if secret != BACKEND_WEBHOOK_SECRET:
+        raise HTTPException(status_code=403, detail="invalid secret")
+
+    campaigns = db.query(Campaign).order_by(Campaign.id.desc()).limit(100).all()
+    return [{**campaign.as_dict(), "stats": get_campaign_stats(db, campaign.id)} for campaign in campaigns]
+
+
+@app.post("/outbound/campaigns/{campaign_id}/run")
+def run_campaign(
+    campaign_id: int,
+    request: Request,
+    db: Session = Depends(get_db),
+):
+    require_webhook_secret(request)
+    campaign = db.query(Campaign).filter(Campaign.id == campaign_id).first()
+    if not campaign:
+        raise HTTPException(status_code=404, detail="campaign not found")
+    campaign.status = "active"
+    campaign.started_at = datetime.utcnow()
+    campaign.updated_at = datetime.utcnow()
+    db.commit()
+    return {"status": "active", "campaign_id": campaign_id, "stats": get_campaign_stats(db, campaign_id)}
+
+
+@app.post("/outbound/campaigns/{campaign_id}/pause")
+def pause_campaign(
+    campaign_id: int,
+    request: Request,
+    db: Session = Depends(get_db),
+):
+    require_webhook_secret(request)
+    campaign = db.query(Campaign).filter(Campaign.id == campaign_id).first()
+    if not campaign:
+        raise HTTPException(status_code=404, detail="campaign not found")
+    campaign.status = "paused"
+    campaign.paused_at = datetime.utcnow()
+    campaign.updated_at = datetime.utcnow()
+    db.commit()
+    return {"status": "paused", "campaign_id": campaign_id, "stats": get_campaign_stats(db, campaign_id)}
+
+
+@app.get("/outbound/tasks/{task_id}/scenario-context")
+def get_scenario_context(
+    task_id: int,
+    request: Request,
+    db: Session = Depends(get_db),
+):
+    require_webhook_secret(request)
+
+    task = db.query(OutboundTask).filter(OutboundTask.id == task_id).first()
+    if not task:
+        raise HTTPException(status_code=404, detail="task not found")
+    contact = db.query(OutboundContact).filter(OutboundContact.id == task.contact_id).first()
+    campaign = db.query(Campaign).filter(Campaign.id == task.campaign_id).first()
+    if not contact or not campaign:
+        raise HTTPException(status_code=404, detail="context not found")
+
+    return build_task_context(campaign, contact, task)
+
+
 @app.post("/webhook/voximplant/call_started")
 async def call_started(
     payload: CallStartedPayload,
@@ -608,6 +1232,10 @@ async def call_started(
     require_webhook_secret(request)
 
     db_call = get_or_create_call(db, payload.session_id)
+    if payload.outbound_task_id:
+        db_call.outbound_task_id = payload.outbound_task_id
+    if payload.campaign_id:
+        db_call.campaign_id = payload.campaign_id
     set_if_value(db_call, "project", payload.project)
     set_if_value(db_call, "script_name", payload.script_name)
     set_if_value(db_call, "caller_phone", payload.caller_phone)
@@ -619,6 +1247,14 @@ async def call_started(
         db_call.started_at = datetime.utcnow()
     db_call.updated_at = datetime.utcnow()
     db_call.status = db_call.status or "started"
+
+    if payload.outbound_task_id:
+        task = db.query(OutboundTask).filter(OutboundTask.id == payload.outbound_task_id).first()
+        if task:
+            task.status = "in_progress"
+            task.voximplant_session_id = payload.session_id
+            task.started_at = db_call.connected_at or datetime.utcnow()
+            task.updated_at = datetime.utcnow()
     db.commit()
 
     return {"status": "success", "session_id": payload.session_id}
@@ -653,6 +1289,10 @@ async def recording_ready(
     require_webhook_secret(request)
 
     db_call = get_or_create_call(db, payload.session_id)
+    if payload.outbound_task_id:
+        db_call.outbound_task_id = payload.outbound_task_id
+    if payload.campaign_id:
+        db_call.campaign_id = payload.campaign_id
     set_if_value(db_call, "project", payload.project)
     set_if_value(db_call, "script_name", payload.script_name)
     db_call.recording_url = payload.recording_url
@@ -702,6 +1342,7 @@ async def finalize_call(
 
     db_call = get_or_create_call(db, payload.session_id)
     fill_call_from_finalize(db_call, payload)
+    update_outbound_task_from_finalize(db, payload)
     db.commit()
 
     if payload.recording_url:

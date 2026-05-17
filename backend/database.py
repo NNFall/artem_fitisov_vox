@@ -19,6 +19,8 @@ class Call(Base):
 
     id = Column(Integer, primary_key=True, index=True)
     voximplant_session_id = Column(String, unique=True, index=True, nullable=False)
+    outbound_task_id = Column(Integer, index=True, nullable=True)
+    campaign_id = Column(Integer, index=True, nullable=True)
     project = Column(String, default="artem_fitisov", nullable=True)
     script_name = Column(String, nullable=True)
     model = Column(String, nullable=True)
@@ -73,6 +75,8 @@ class Call(Base):
         return {
             "id": self.id,
             "session_id": self.voximplant_session_id,
+            "outbound_task_id": self.outbound_task_id,
+            "campaign_id": self.campaign_id,
             "project": self.project,
             "script_name": self.script_name,
             "model": self.model,
@@ -111,7 +115,124 @@ class Call(Base):
         }
 
 
+class Campaign(Base):
+    __tablename__ = "campaigns"
+
+    id = Column(Integer, primary_key=True, index=True)
+    name = Column(String, index=True, nullable=False)
+    status = Column(String, default="paused", index=True, nullable=True)
+    source_filename = Column(String, nullable=True)
+    prompt_context = Column(Text, nullable=True)
+    default_max_attempts = Column(Integer, default=1, nullable=True)
+    created_by_chat_id = Column(String, index=True, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=True)
+    updated_at = Column(DateTime, default=datetime.utcnow, nullable=True)
+    started_at = Column(DateTime, nullable=True)
+    paused_at = Column(DateTime, nullable=True)
+
+    def as_dict(self):
+        return {
+            "id": self.id,
+            "name": self.name,
+            "status": self.status,
+            "source_filename": self.source_filename,
+            "prompt_context": self.prompt_context,
+            "default_max_attempts": self.default_max_attempts,
+            "created_by_chat_id": self.created_by_chat_id,
+            "created_at": self.created_at.isoformat() if self.created_at else None,
+            "updated_at": self.updated_at.isoformat() if self.updated_at else None,
+            "started_at": self.started_at.isoformat() if self.started_at else None,
+            "paused_at": self.paused_at.isoformat() if self.paused_at else None,
+        }
+
+
+class OutboundContact(Base):
+    __tablename__ = "outbound_contacts"
+
+    id = Column(Integer, primary_key=True, index=True)
+    campaign_id = Column(Integer, index=True, nullable=False)
+    phone = Column(String, index=True, nullable=False)
+    name = Column(String, index=True, nullable=True)
+    company = Column(String, index=True, nullable=True)
+    city = Column(String, nullable=True)
+    source = Column(String, nullable=True)
+    task = Column(Text, nullable=True)
+    context = Column(Text, nullable=True)
+    preferred_time = Column(String, nullable=True)
+    timezone = Column(String, nullable=True)
+    raw_row_json = Column(Text, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=True)
+    updated_at = Column(DateTime, default=datetime.utcnow, nullable=True)
+
+    def as_dict(self):
+        return {
+            "id": self.id,
+            "campaign_id": self.campaign_id,
+            "phone": self.phone,
+            "name": self.name,
+            "company": self.company,
+            "city": self.city,
+            "source": self.source,
+            "task": self.task,
+            "context": self.context,
+            "preferred_time": self.preferred_time,
+            "timezone": self.timezone,
+            "created_at": self.created_at.isoformat() if self.created_at else None,
+            "updated_at": self.updated_at.isoformat() if self.updated_at else None,
+        }
+
+
+class OutboundTask(Base):
+    __tablename__ = "outbound_tasks"
+
+    id = Column(Integer, primary_key=True, index=True)
+    campaign_id = Column(Integer, index=True, nullable=False)
+    contact_id = Column(Integer, index=True, nullable=False)
+    phone = Column(String, index=True, nullable=False)
+    status = Column(String, default="pending", index=True, nullable=True)
+    priority = Column(Integer, default=100, nullable=True)
+    scheduled_at = Column(DateTime, default=datetime.utcnow, index=True, nullable=True)
+    started_at = Column(DateTime, nullable=True)
+    finished_at = Column(DateTime, nullable=True)
+    last_attempt_at = Column(DateTime, nullable=True)
+    next_attempt_at = Column(DateTime, nullable=True)
+    attempt_count = Column(Integer, default=0, nullable=True)
+    max_attempts = Column(Integer, default=1, nullable=True)
+    voximplant_session_id = Column(String, index=True, nullable=True)
+    start_result_json = Column(Text, nullable=True)
+    result_status = Column(String, nullable=True)
+    result_summary = Column(Text, nullable=True)
+    last_error = Column(Text, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=True)
+    updated_at = Column(DateTime, default=datetime.utcnow, nullable=True)
+
+    def as_dict(self):
+        return {
+            "id": self.id,
+            "campaign_id": self.campaign_id,
+            "contact_id": self.contact_id,
+            "phone": self.phone,
+            "status": self.status,
+            "priority": self.priority,
+            "scheduled_at": self.scheduled_at.isoformat() if self.scheduled_at else None,
+            "started_at": self.started_at.isoformat() if self.started_at else None,
+            "finished_at": self.finished_at.isoformat() if self.finished_at else None,
+            "last_attempt_at": self.last_attempt_at.isoformat() if self.last_attempt_at else None,
+            "next_attempt_at": self.next_attempt_at.isoformat() if self.next_attempt_at else None,
+            "attempt_count": self.attempt_count,
+            "max_attempts": self.max_attempts,
+            "voximplant_session_id": self.voximplant_session_id,
+            "result_status": self.result_status,
+            "result_summary": self.result_summary,
+            "last_error": self.last_error,
+            "created_at": self.created_at.isoformat() if self.created_at else None,
+            "updated_at": self.updated_at.isoformat() if self.updated_at else None,
+        }
+
+
 SQLITE_CALLS_COLUMNS = {
+    "outbound_task_id": "INTEGER",
+    "campaign_id": "INTEGER",
     "project": "TEXT",
     "script_name": "TEXT",
     "model": "TEXT",

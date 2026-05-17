@@ -60,6 +60,14 @@ const safeJson = (value) => {
         return safeString(value);
     }
 };
+const parseJsonMaybe = (value) => {
+    if (!value || typeof value !== 'string') return null;
+    try {
+        return JSON.parse(value);
+    } catch (e) {
+        return null;
+    }
+};
 const normalizeText = (text) =>
     safeString(text)
         .replace(/\s+/g, ' ')
@@ -80,7 +88,30 @@ const extractText = (value) => {
 const extractEventPayload = (event) =>
     event && event.data && event.data.payload ? event.data.payload : {};
 
-const buildSystemInstruction = (phone) => `
+const buildLeadContextText = (leadContext) => {
+    if (!leadContext) return '';
+    const lines = [];
+    if (leadContext.client_name) lines.push(`- имя клиента: ${leadContext.client_name}`);
+    if (leadContext.company) lines.push(`- компания/ниша: ${leadContext.company}`);
+    if (leadContext.city) lines.push(`- город: ${leadContext.city}`);
+    if (leadContext.source) lines.push(`- источник: ${leadContext.source}`);
+    if (leadContext.task) lines.push(`- предварительный интерес/задача: ${leadContext.task}`);
+    if (leadContext.context) lines.push(`- дополнительный контекст по лиду: ${leadContext.context}`);
+    if (leadContext.preferred_time) lines.push(`- удобное время: ${leadContext.preferred_time}`);
+    if (leadContext.campaign_context) lines.push(`- общий контекст кампании: ${leadContext.campaign_context}`);
+    if (!lines.length) return '';
+    return `
+==================================================
+ДАННЫЕ ЛИДА ИЗ БАЗЫ
+==================================================
+
+${lines.join('\n')}
+
+Используй эти данные аккуратно. Не зачитывай их списком. Если имя известно, можешь обратиться по имени. Если контекст не подтвержден клиентом, формулируй мягко: "вижу, что был интерес к..." или "по заявке указано...".
+`;
+};
+
+const buildSystemInstruction = (phone, leadContext) => `
 Ты — Екатерина, голосовой AI-помощник и менеджер по первичной квалификации заявок.
 Ты звонишь по теплой базе: человек был на ${LEAD_SOURCE}, видел демонстрацию AI-решения или оставлял контакт/заявку на консультацию.
 
@@ -288,11 +319,15 @@ ${SUMMARY_FUNCTION_NAME}
 «Клиент подтвердил интерес к внедрению голосового AI-помощника. Основная задача — автоматизировать первичную обработку заявок и часть исходящих звонков. CRM пока не уточнена, клиент готов к короткой консультации со специалистом. Следующий шаг — связаться по текущему номеру и обсудить пилотный сценарий.»
 
 Если данных нет, не выдумывай. Лучше честно укажи, что клиент не дал подробностей.
+
+${buildLeadContextText(leadContext)}
 `;
 
 VoxEngine.addEventListener(AppEvents.Started, async () => {
-    const targets = CALL_TARGETS.map(normalizePhone).filter((phone) => phone.length > 0);
+    let targets = CALL_TARGETS.map(normalizePhone).filter((phone) => phone.length > 0);
     const callerId = normalizePhone(CALLER_ID);
+    let scenarioCustomData = {};
+    let leadContext = {};
 
     let backendUrl = '';
     let backendWebhookSecret = '';
@@ -309,6 +344,18 @@ VoxEngine.addEventListener(AppEvents.Started, async () => {
         backendWebhookSecret = safeString((backendSecretEntry && backendSecretEntry.value) || BACKEND_WEBHOOK_SECRET_FALLBACK).trim();
     } catch (e) {
         Logger.write('===BACKEND_CONFIG_LOAD_ERROR===');
+        Logger.write(String(e));
+    }
+
+    try {
+        const rawCustomData =
+            typeof VoxEngine.customData === 'function'
+                ? safeString(VoxEngine.customData())
+                : '';
+        scenarioCustomData = parseJsonMaybe(rawCustomData) || {};
+        Logger.write(`===CUSTOM_DATA:${safeJson(scenarioCustomData)}===`);
+    } catch (e) {
+        Logger.write('===CUSTOM_DATA_READ_ERROR===');
         Logger.write(String(e));
     }
 
@@ -358,6 +405,88 @@ VoxEngine.addEventListener(AppEvents.Started, async () => {
         );
     };
 
+    const fetchTaskContext = (taskId) =>
+        new Promise((resolve) => {
+            if (!backendUrl || !taskId) {
+                resolve(null);
+                return;
+            }
+            if (typeof Net === 'undefined' || typeof Net.httpRequest !== 'function') {
+                Logger.write('===TASK_CONTEXT_SKIP_NET_UNAVAILABLE===');
+                resolve(null);
+                return;
+            }
+
+            const options = {
+                method: 'GET',
+                headers: {}
+            };
+            if (backendWebhookSecret) {
+                options.headers['X-Webhook-Secret'] = backendWebhookSecret;
+            }
+
+            Net.httpRequest(
+                `${backendUrl}/outbound/tasks/${encodeURIComponent(taskId)}/scenario-context`,
+                (res) => {
+                    Logger.write(`===TASK_CONTEXT_FETCH_DONE code=${res.code}===`);
+                    if (!res || res.code < 200 || res.code >= 300) {
+                        Logger.write(safeString(res && res.text));
+                        resolve(null);
+                        return;
+                    }
+                    const parsed = parseJsonMaybe(safeString(res.text));
+                    resolve(parsed);
+                },
+                options
+            );
+        });
+
+    const mergeLeadContext = (...items) => {
+        const merged = {};
+        items.forEach((item) => {
+            if (!item || typeof item !== 'object' || Array.isArray(item)) return;
+            Object.keys(item).forEach((key) => {
+                const value = item[key];
+                if (value !== undefined && value !== null && value !== '') merged[key] = value;
+            });
+        });
+        return merged;
+    };
+
+    const loadLeadContextFromCustomData = async () => {
+        const custom = scenarioCustomData && typeof scenarioCustomData === 'object' ? scenarioCustomData : {};
+        const directContext = mergeLeadContext(
+            custom.lead_context,
+            custom.context && typeof custom.context === 'object' ? custom.context : null,
+            {
+                task_id: custom.task_id || custom.outbound_task_id,
+                campaign_id: custom.campaign_id,
+                phone: custom.phone,
+                client_name: custom.client_name || custom.name,
+                company: custom.company,
+                city: custom.city,
+                source: custom.source,
+                task: custom.task,
+                row_context: typeof custom.context === 'string' ? custom.context : custom.row_context,
+                campaign_context: custom.campaign_context,
+                preferred_time: custom.preferred_time,
+                timezone: custom.timezone
+            }
+        );
+
+        const taskId = custom.task_id || custom.outbound_task_id || directContext.task_id;
+        if (taskId) {
+            const fetchedContext = await fetchTaskContext(taskId);
+            leadContext = mergeLeadContext(directContext, fetchedContext);
+        } else {
+            leadContext = directContext;
+        }
+
+        const customPhone = normalizePhone(leadContext.phone || custom.phone || '');
+        if (customPhone) targets = [customPhone];
+        Logger.write(`===LEAD_CONTEXT:${safeJson(leadContext)}===`);
+    };
+
     const closeGeminiClient = () => {
         try {
             if (activeGeminiClient) activeGeminiClient.close();
@@ -405,6 +534,9 @@ VoxEngine.addEventListener(AppEvents.Started, async () => {
         const session = {
             targetPhone,
             sessionId: `outbound-${Date.now()}-${index}`,
+            outboundTaskId: leadContext && leadContext.task_id ? Number(leadContext.task_id) : 0,
+            campaignId: leadContext && leadContext.campaign_id ? Number(leadContext.campaign_id) : 0,
+            leadContext,
             connectedAtUtc: '',
             finalizationReason: '',
             callConnected: false,
@@ -435,8 +567,8 @@ VoxEngine.addEventListener(AppEvents.Started, async () => {
                 usage_events: 0
             },
             summaryData: {
-                client_name: '',
-                client_phone: '',
+                client_name: safeString(leadContext && (leadContext.client_name || leadContext.name)),
+                client_phone: targetPhone,
                 call_goal: '',
                 manager_offer: '',
                 outcome: '',
@@ -568,6 +700,8 @@ VoxEngine.addEventListener(AppEvents.Started, async () => {
             const summary = getSummaryOrFallback();
             return {
                 session_id: session.sessionId,
+                outbound_task_id: session.outboundTaskId || undefined,
+                campaign_id: session.campaignId || undefined,
                 project: PROJECT_NAME,
                 script_name: SCRIPT_NAME,
                 exported_at_utc: new Date().toISOString(),
@@ -607,6 +741,8 @@ VoxEngine.addEventListener(AppEvents.Started, async () => {
                 '/webhook/voximplant/recording_ready',
                 {
                     session_id: session.sessionId,
+                    outbound_task_id: session.outboundTaskId || undefined,
+                    campaign_id: session.campaignId || undefined,
                     project: PROJECT_NAME,
                     script_name: SCRIPT_NAME,
                     recording_url: session.recordingUrl,
@@ -816,7 +952,7 @@ VoxEngine.addEventListener(AppEvents.Started, async () => {
                         }
                     ],
                     systemInstruction: {
-                        parts: [{ text: buildSystemInstruction(targetPhone) }]
+                        parts: [{ text: buildSystemInstruction(targetPhone, session.leadContext) }]
                     }
                 }
             });
@@ -951,6 +1087,8 @@ VoxEngine.addEventListener(AppEvents.Started, async () => {
                 '/webhook/voximplant/call_started',
                 {
                     session_id: session.sessionId,
+                    outbound_task_id: session.outboundTaskId || undefined,
+                    campaign_id: session.campaignId || undefined,
                     project: PROJECT_NAME,
                     script_name: SCRIPT_NAME,
                     caller_phone: callerId,
@@ -1039,6 +1177,8 @@ VoxEngine.addEventListener(AppEvents.Started, async () => {
         VoxEngine.terminate();
         return;
     }
+
+    await loadLeadContextFromCustomData();
 
     if (!targets.length) {
         Logger.write('===EMPTY_CALL_TARGETS===');

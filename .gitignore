@@ -7,4 +7,6 @@ backend/voximplant.db
 backend/backend.log
 backend/recordings/*
 !backend/recordings/.gitkeep
+backend/imports/*
+!backend/imports/.gitkeep
 .pytest_cache/

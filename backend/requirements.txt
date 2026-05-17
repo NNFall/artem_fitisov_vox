@@ -7,4 +7,5 @@ sqlalchemy
 apscheduler
 aiohttp
 voximplant-apiclient
+openpyxl
 
