@@ -620,6 +620,7 @@ async def persist_recording_download(session_id: str, url: str):
             return
         if local_path:
             db_call.local_recording_path = local_path
+            db_call.last_error = None
         if error_text:
             db_call.last_error = error_text
         if db_call.recording_status in (None, "", "not_started", "requested_not_confirmed"):
