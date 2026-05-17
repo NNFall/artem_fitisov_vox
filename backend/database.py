@@ -1,0 +1,169 @@
+import os
+from datetime import datetime
+
+from sqlalchemy import Column, DateTime, Float, Integer, String, Text, create_engine, inspect, text
+from sqlalchemy.orm import declarative_base, sessionmaker
+
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+DATABASE_URL = os.getenv("DATABASE_URL") or f"sqlite:///{os.path.join(BASE_DIR, 'voximplant.db')}"
+
+connect_args = {"check_same_thread": False} if DATABASE_URL.startswith("sqlite") else {}
+engine = create_engine(DATABASE_URL, connect_args=connect_args)
+SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+
+Base = declarative_base()
+
+
+class Call(Base):
+    __tablename__ = "calls"
+
+    id = Column(Integer, primary_key=True, index=True)
+    voximplant_session_id = Column(String, unique=True, index=True, nullable=False)
+    project = Column(String, default="artem_fitisov", nullable=True)
+    script_name = Column(String, nullable=True)
+    model = Column(String, nullable=True)
+
+    caller_phone = Column(String, index=True, nullable=True)
+    client_phone = Column(String, index=True, nullable=True)
+    client_name = Column(String, index=True, nullable=True)
+
+    started_at = Column(DateTime, default=datetime.utcnow, nullable=True)
+    connected_at = Column(DateTime, nullable=True)
+    finished_at = Column(DateTime, nullable=True)
+    exported_at = Column(DateTime, nullable=True)
+    updated_at = Column(DateTime, default=datetime.utcnow, nullable=True)
+
+    duration = Column(Integer, nullable=True)
+    telephony_cost_rub = Column(Float, nullable=True)
+    websocket_duration_sec = Column(Float, nullable=True)
+    websocket_cost_rub = Column(Float, nullable=True)
+    voximplant_total_rub = Column(Float, nullable=True)
+    ai_cost_usd = Column(Float, nullable=True)
+    ai_cost_rub = Column(Float, nullable=True)
+    total_cost_rub = Column(Float, nullable=True)
+
+    summary = Column(Text, nullable=True)
+    call_goal = Column(Text, nullable=True)
+    manager_offer = Column(Text, nullable=True)
+    outcome = Column(Text, nullable=True)
+    next_step = Column(Text, nullable=True)
+    dialogue_text = Column(Text, nullable=True)
+
+    recording_status = Column(String, nullable=True)
+    recording_url = Column(String, nullable=True)
+    local_recording_path = Column(String, nullable=True)
+    recording_error = Column(Text, nullable=True)
+
+    usage_json = Column(Text, nullable=True)
+    summary_fields_json = Column(Text, nullable=True)
+    dialogue_items_json = Column(Text, nullable=True)
+    admin_report_html = Column(Text, nullable=True)
+    summary_report_html = Column(Text, nullable=True)
+    raw_payload_json = Column(Text, nullable=True)
+
+    telegram_admin_status = Column(String, nullable=True)
+    telegram_summary_status = Column(String, nullable=True)
+    google_sheets_status = Column(String, nullable=True)
+    google_sheets_response = Column(Text, nullable=True)
+    last_error = Column(Text, nullable=True)
+
+    status = Column(String, default="started", nullable=True)
+
+    def as_dict(self):
+        return {
+            "id": self.id,
+            "session_id": self.voximplant_session_id,
+            "project": self.project,
+            "script_name": self.script_name,
+            "model": self.model,
+            "caller_phone": self.caller_phone,
+            "client_phone": self.client_phone,
+            "client_name": self.client_name,
+            "started_at": self.started_at.isoformat() if self.started_at else None,
+            "connected_at": self.connected_at.isoformat() if self.connected_at else None,
+            "finished_at": self.finished_at.isoformat() if self.finished_at else None,
+            "exported_at": self.exported_at.isoformat() if self.exported_at else None,
+            "updated_at": self.updated_at.isoformat() if self.updated_at else None,
+            "duration": self.duration,
+            "telephony_cost_rub": self.telephony_cost_rub,
+            "websocket_duration_sec": self.websocket_duration_sec,
+            "websocket_cost_rub": self.websocket_cost_rub,
+            "voximplant_total_rub": self.voximplant_total_rub,
+            "ai_cost_usd": self.ai_cost_usd,
+            "ai_cost_rub": self.ai_cost_rub,
+            "total_cost_rub": self.total_cost_rub,
+            "summary": self.summary,
+            "call_goal": self.call_goal,
+            "manager_offer": self.manager_offer,
+            "outcome": self.outcome,
+            "next_step": self.next_step,
+            "dialogue_text": self.dialogue_text,
+            "recording_status": self.recording_status,
+            "recording_url": self.recording_url,
+            "local_recording_path": self.local_recording_path,
+            "recording_error": self.recording_error,
+            "telegram_admin_status": self.telegram_admin_status,
+            "telegram_summary_status": self.telegram_summary_status,
+            "google_sheets_status": self.google_sheets_status,
+            "google_sheets_response": self.google_sheets_response,
+            "last_error": self.last_error,
+            "status": self.status,
+        }
+
+
+SQLITE_CALLS_COLUMNS = {
+    "project": "TEXT",
+    "script_name": "TEXT",
+    "model": "TEXT",
+    "client_phone": "TEXT",
+    "client_name": "TEXT",
+    "connected_at": "DATETIME",
+    "exported_at": "DATETIME",
+    "updated_at": "DATETIME",
+    "telephony_cost_rub": "REAL",
+    "websocket_duration_sec": "REAL",
+    "websocket_cost_rub": "REAL",
+    "voximplant_total_rub": "REAL",
+    "ai_cost_usd": "REAL",
+    "ai_cost_rub": "REAL",
+    "total_cost_rub": "REAL",
+    "call_goal": "TEXT",
+    "manager_offer": "TEXT",
+    "outcome": "TEXT",
+    "next_step": "TEXT",
+    "dialogue_text": "TEXT",
+    "recording_status": "TEXT",
+    "recording_error": "TEXT",
+    "usage_json": "TEXT",
+    "summary_fields_json": "TEXT",
+    "dialogue_items_json": "TEXT",
+    "admin_report_html": "TEXT",
+    "summary_report_html": "TEXT",
+    "raw_payload_json": "TEXT",
+    "telegram_admin_status": "TEXT",
+    "telegram_summary_status": "TEXT",
+    "google_sheets_status": "TEXT",
+    "google_sheets_response": "TEXT",
+    "last_error": "TEXT",
+}
+
+
+def ensure_sqlite_columns():
+    if engine.url.get_backend_name() != "sqlite":
+        return
+
+    inspector = inspect(engine)
+    if "calls" not in inspector.get_table_names():
+        return
+
+    existing_columns = {column["name"] for column in inspector.get_columns("calls")}
+
+    with engine.begin() as connection:
+        for column_name, column_type in SQLITE_CALLS_COLUMNS.items():
+            if column_name in existing_columns:
+                continue
+            connection.execute(text(f"ALTER TABLE calls ADD COLUMN {column_name} {column_type}"))
+
+
+Base.metadata.create_all(bind=engine)
+ensure_sqlite_columns()

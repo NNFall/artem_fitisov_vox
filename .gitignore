@@ -1,0 +1,10 @@
+backend/.env
+backend/keys/*.json
+backend/venv/
+backend/__pycache__/
+backend/*.pyc
+backend/voximplant.db
+backend/backend.log
+backend/recordings/*
+!backend/recordings/.gitkeep
+.pytest_cache/

@@ -1,0 +1,282 @@
+// VoxEngine scenario: OpenAI Realtime (text-only) + ElevenLabs Realtime TTS
+// Основано на официальных примерах Voximplant (RealtimeAPIEvents.*)
+// ─────────────────────────────────────────────────────────────────────────────
+require(Modules.OpenAI);
+require(Modules.ElevenLabs);
+
+VoxEngine.addEventListener(AppEvents.CallAlerting, async ({ call }) => {
+  // <<< ЗАМЕНИ НА СВОИ СЕКРЕТЫ >>>
+  const OPENAI_API_KEY = 'REDACTED_OPENAI_API_KEY';
+  const ELEVENLABS_API_KEY = 'REDACTED_ELEVENLABS_API_KEY';
+  const YOUR_BACKEND_URL = 'http://91.197.99.146:8000/book';
+  const MODEL = 'gpt-realtime'; // из официального примера
+
+  // ElevenLabs TTS настройки (из оф. примера + свой ключ в headers)
+  const pathParameters = {
+    // выбери голос в кабинете ElevenLabs (пример: Alice)
+    voice_id: 'MF3mGyEYCl7XYWbV9V6O',
+  };
+  const queryParameters = {
+    // для низкой задержки чаще берут Flash
+    model_id: 'eleven_turbo_v2_5',
+    voice_settings: JSON.stringify({
+      //stability: 0.35,
+      //similarity_boost: 0.8,
+      speaking_rate: 1.15
+    })
+    // НЕ указываем output_format в request — модуль сам выставит PCM 16 kHz
+  };
+  const ttsParameters = {
+    pathParameters,
+    queryParameters,
+    keepAlive: true,
+    // прокидываем свой ключ ElevenLabs (Custom API keys)
+    headers: [
+      { name: 'xi-api-key', value: ELEVENLABS_API_KEY },
+      // если у тебя формат Bearer — замени на Authorization: Bearer ...
+    ],
+  };
+
+  let realtimeAPIClient = undefined;
+  let player = undefined;
+  let greetingPlayed = false;
+
+  call.answer();
+
+  const cleanup = () => {
+    try { if (realtimeAPIClient) realtimeAPIClient.close(); } catch (_e) {}
+    VoxEngine.terminate();
+  };
+  call.addEventListener(CallEvents.Disconnected, cleanup);
+  call.addEventListener(CallEvents.Failed, cleanup);
+
+  const onWebSocketClose = () => VoxEngine.terminate();
+
+  const realtimeAPIClientParameters = {
+    model: MODEL,
+    apiKey: OPENAI_API_KEY,
+    type: OpenAI.RealtimeAPIClientType.REALTIME,
+    onWebSocketClose,
+  };
+
+  try {
+    // 1) Создаём Realtime-клиент
+    realtimeAPIClient = await OpenAI.createRealtimeAPIClient(realtimeAPIClientParameters);
+
+    // Пока что шлём медиа из OpenAI в звонок (как в оф. примере)
+    // В нашем кейсе голос будет от ElevenLabs — это не мешает
+    realtimeAPIClient.sendMediaTo(call);
+
+    // Базовые логи ошибок
+    realtimeAPIClient.addEventListener(OpenAI.RealtimeAPIEvents.Error, (event) => {
+      Logger.write('===OpenAI.RealtimeAPIEvents.Error===');
+      Logger.write(JSON.stringify(event));
+    });
+
+    // 2) Сессия создана — настраиваем текстовый режим и VAD
+    realtimeAPIClient.addEventListener(OpenAI.RealtimeAPIEvents.SessionCreated, (event) => {
+      Logger.write('===OpenAI.RealtimeAPIEvents.SessionCreated===');
+      Logger.write(JSON.stringify(event));
+
+      // ВАЖНО: просим ТОЛЬКО ТЕКСТ (output_modalities: ["text"])
+      // + включаем распознавание входа
+      realtimeAPIClient.sessionUpdate({
+        "session": {
+          "type": "realtime",
+          "output_modalities": ["text"],                      // ← текст, без аудио от OpenAI
+          "instructions": `Ты — профессиональный и эффективный ассистент по бронированию билетов. Твой стиль — чёткий, по делу. Время рейса (доступно только: 5:00, 9:00, 13:00). Города только Санкт-Питербург и Москва.
+- Главная цель: собрать (направление, дата, время, места, ФИО) и вызвать функцию.
+- Не переспрашивай: если пользователь сказал "30 августа, одно место" — подтверди и попроси следующий пункт.
+- После сбора данных: "Секундочку, проверяю наличие..." и вызывай 'book_trip'.
+- Если success=true: "Отлично, бронь подтверждена. Всего доброго!".
+- Если success=false: озвучь reason из details и предложи альтернативу.`,
+          // "audio": {
+          //   "input": {
+          //     "transcription": {
+          //       // можно whisper-1, но быстрее и качественнее обычно gpt-4o-mini-transcribe
+          //       //"model": "gpt-4o-mini-transcribe",
+          //       "language": "ru"
+          //     }
+          //   }
+          // },
+          "turn_detection": {
+            "type": "server_vad",
+            "create_response": true,
+            "interrupt_response": true,
+            "prefix_padding_ms": 300,
+            "silence_duration_ms": 200,
+            "threshold": 0.5
+          }
+        }
+      });
+
+      // триггерим приветствие
+      realtimeAPIClient.responseCreate({}); // пустой response — как в примере
+    });
+
+    // 3) Обработка полного текста ответа — флашим плеер и открываем голос пользователя
+    realtimeAPIClient.addEventListener(OpenAI.RealtimeAPIEvents.ResponseOutputTextDone, (_event) => {
+      if (player) player.append(" ", true); // flush + endOfTurn
+      if (!greetingPlayed) {
+        greetingPlayed = true;
+        // Начинаем отправлять голос пользователя в OpenAI после первой реплики
+        call.sendMediaTo(realtimeAPIClient);
+      }
+    });
+
+    // 4) Дельты текста — создаём/кормим ElevenLabs плеер
+    realtimeAPIClient.addEventListener(OpenAI.RealtimeAPIEvents.ResponseOutputTextDelta, (event) => {
+      const chunk = event?.data?.payload?.delta || "";
+      if (!chunk) return;
+
+      if (!player) {
+        // создаём TTS-плеер с первым куском текста
+        player = ElevenLabs.createRealtimeTTSPlayer(chunk, ttsParameters);
+        // направляем озвучку в звонок
+        player.sendMediaTo(call);
+      } else {
+        // добавляем дельты
+        player.append(chunk);
+      }
+    });
+
+    // 5) Поддержка прерываний: если VAD услышал речь абонента — останавливаем озвучку и чистим буферы
+    realtimeAPIClient.addEventListener(OpenAI.RealtimeAPIEvents.InputAudioBufferSpeechStarted, (_event) => {
+      if (player) player.clearBuffer();         // остановить TTS
+      if (realtimeAPIClient) realtimeAPIClient.clearMediaBuffer(); // очистить буфер вывода OpenAI
+    });
+
+    // 6) Вызовы функций — оставляем твою логику, возвращаем в модель текст (без аудио)
+    realtimeAPIClient.addEventListener(OpenAI.RealtimeAPIEvents.ResponseFunctionCallArgumentsDone, async (event) => {
+      const { name, arguments: argsStr } = event.data || {};
+      if (name !== "book_trip") return;
+
+      Logger.write(`book_trip args: ${argsStr}`);
+      let functionResult;
+      try {
+        const result = await Net.httpRequestAsync(YOUR_BACKEND_URL, {
+          method: "POST",
+          headers: ["Content-Type: application/json"],
+          postData: argsStr
+        });
+        functionResult = result.text;
+        Logger.write(`backend result: ${functionResult}`);
+      } catch (e) {
+        functionResult = JSON.stringify({ success: false, error: e.message });
+        Logger.write(`backend error: ${functionResult}`);
+      }
+
+      // Просим у модели текстовый ответ (OpenAI сам не озвучивает)
+      realtimeAPIClient.responseCreate({
+        // (в этой версии SDK текстовый режим задан на уровне session.output_modalities=["text"])
+        // так что пустого объекта достаточно; но добавим подсказку:
+        "instructions": `Вот результат выполнения функции: \`${functionResult}\`.
+Сформулируй краткий и понятный ответ пользователю на русском.`
+      });
+    });
+
+  } catch (error) {
+    Logger.write('Critical scenario error:');
+    Logger.write(error.stack || error);
+    cleanup();
+  }
+});
+
+
+
+
+// require(Modules.OpenAI);
+
+// VoxEngine.addEventListener(AppEvents.CallAlerting, async ({ call }) => {
+//     const OPENAI_API_KEY = 'REDACTED_OPENAI_API_KEY'; 
+//     const YOUR_BACKEND_URL = 'http://91.197.99.146:8000/book';
+//     const MODEL = "gpt-4o-realtime-preview";
+//     let realtimeAPIClient;
+//     let greetingPlayed = false;
+
+//     const cleanup = () => {
+//         if (realtimeAPIClient) realtimeAPIClient.close();
+//         VoxEngine.terminate();
+//     };
+//     call.addEventListener(CallEvents.Disconnected, cleanup);
+//     call.addEventListener(CallEvents.Failed, cleanup);
+
+//     try {
+//         await call.answer();
+        
+//         realtimeAPIClient = await OpenAI.Beta.createRealtimeAPIClient({
+//             apiKey: OPENAI_API_KEY,
+//             model: MODEL
+//         });
+
+//         // --- Эта часть кода работает идеально, оставляем ее как есть ---
+//         realtimeAPIClient.addEventListener(OpenAI.Beta.RealtimeAPIEvents.ResponseFunctionCallArgumentsDone, async (event) => {
+//             const { name, arguments: argsStr } = event.data;
+//             const args = JSON.parse(argsStr);
+
+//             if (name === "book_trip") {
+//                 Logger.write(`Вызов функции book_trip с аргументами: ${JSON.stringify(args)}`);
+//                 let functionResult;
+//                 try {
+//                     const result = await Net.httpRequestAsync(YOUR_BACKEND_URL, {
+//                         method: "POST", headers: [ "Content-Type: application/json" ], postData: JSON.stringify(args)
+//                     });
+//                     functionResult = result.text;
+//                     Logger.write(`Получен ответ от сервера: ${functionResult}`);
+//                 } catch (e) {
+//                     functionResult = JSON.stringify({ success: false, error: e.message });
+//                     Logger.write(`Критическая ошибка при обращении к API: ${functionResult}`);
+//                 }
+                
+//                 const responseWithResult = {
+//                     instructions: `Вот результат выполнения функции: \`${functionResult}\`. Основываясь на этом JSON, дай вежливый и понятный ответ пользователю на русском языке.`
+//                 };
+//                 realtimeAPIClient.responseCreate(responseWithResult);
+//             }
+//         });
+
+//         realtimeAPIClient.addEventListener(OpenAI.Beta.Events.WebSocketMediaEnded, (event) => {
+//             if (!greetingPlayed) {
+//                 greetingPlayed = true;
+//                 VoxEngine.sendMediaBetween(call, realtimeAPIClient);
+//             }
+//         });
+
+//         realtimeAPIClient.sendMediaTo(call);
+
+//         const session_update = {
+//             // --- ИЗМЕНЕНИЕ ЗДЕСЬ: ОБНОВЛЕННЫЙ ПРОМПТ ---
+//             "instructions": `Ты — профессиональный и эффективный ассистент по бронированию билетов. Твой стиль общения — четкий, по делу, без лишних слов.
+// - Твоя главная цель: быстро собрать данные (направление, дата, время, количество мест, ФИО) и вызвать функцию.
+// - НЕ переспрашивай для подтверждения. Если пользователь сказал "30 августа, одно место", просто подтверди: "Понял, 30 августа, одно место" и запроси следующую информацию.
+// - После сбора всех данных, скажи "Секундочку, проверяю наличие мест..." и немедленно вызывай функцию 'book_trip'.
+// - Получив результат от функции, обработай его так:
+//   - Если в результате 'success' равно 'true', четко скажи: "Отлично, бронь подтверждена. Всего доброго!".
+//   - Если 'success' равно 'false', внимательно прочитай объект 'details'. Сообщи пользователю причину отказа из поля 'reason'. Например: "К сожалению, бронь не подтверждена. Свободно только 2 места.". После этого предложи альтернативу: "Хотите попробовать забронировать на другое время в этот же день?"`,
+//             "voice": "alloy",
+//             "speed": 1.15,
+//             "tools": [{
+//                 "type": "function", "name": "book_trip", "description": "Забронировать место на рейс после сбора всех данных.",
+//                 "parameters": {
+//                     "type": "object",
+//                     "properties": {
+//                         "direction": { "type": "string" }, "date": { "type": "string" }, "time": { "type": "string" },
+//                         "seats": { "type": "integer" }, "fullName": { "type": "string" }
+//                     },
+//                     "required": ["direction", "date", "time", "seats", "fullName"]
+//                 }
+//             }],
+//             "tool_choice": "auto"
+//         };
+//         realtimeAPIClient.sessionUpdate(session_update);
+
+//         realtimeAPIClient.responseCreate({
+//             'instructions': 'Скажи обязательное приветствие: АвтоГаз слушает.'
+//         });
+
+//     } catch (error) {
+//         Logger.write("Произошла критическая ошибка в сценарии:");
+//         Logger.write(error.stack || error);
+//         cleanup();
+//     }
+// });
