@@ -228,10 +228,21 @@ def is_admin_chat(chat_id: Any) -> bool:
 PHONE_RE = re.compile(r"[^\d+]")
 
 
+def import_cell_text(value: Any) -> str:
+    if isinstance(value, float) and value.is_integer():
+        return str(int(value))
+    return safe_text(value).strip()
+
+
 def normalize_phone(value: Any) -> str:
-    phone = PHONE_RE.sub("", safe_text(value)).strip()
+    text = import_cell_text(value)
+    candidates = re.findall(r"\+?\d[\d\s\-()]{7,}\d", text)
+    phone_source = candidates[0] if candidates else text
+    phone = PHONE_RE.sub("", phone_source).strip()
     if phone.startswith("+"):
         phone = phone[1:]
+    if phone.endswith("0") and "." in text and text.endswith(".0"):
+        phone = phone[:-1]
     if phone.startswith("8") and len(phone) == 11:
         phone = "7" + phone[1:]
     return phone
@@ -323,11 +334,22 @@ DEFAULT_NO_DIALOGUE = "\u0420\u0435\u043f\u043b\u0438\u043a\u0438 \u043d\u0435 \
 
 
 COLUMN_ALIASES = {
-    "phone": {"phone", "tel", "telephone", "номер", "телефон", "номер телефона", "phone_number"},
+    "phone": {"phone", "tel", "telephone", "номер", "телефон", "номер телефона", "phone_number", "контактный телефон", "контактныйтелефон"},
     "name": {"name", "client_name", "имя", "клиент", "фио", "контакт"},
+    "last_name": {"last_name", "surname", "фамилия"},
+    "email": {"email", "e-mail", "mail", "почта", "электронная почта"},
     "company": {"company", "компания", "организация", "бизнес"},
     "city": {"city", "город"},
     "source": {"source", "источник", "мероприятие", "event"},
+    "attendance_status": {"пришел", "пришёл", "посетил", "статус участия"},
+    "dial_status": {"дозвон", "дозвон да/нет", "дозвон да нет"},
+    "activity_type": {"вид деятельности", "деятельность", "ниша"},
+    "is_decision_maker": {"руководитель компании, да/нет", "руководитель компании", "руководитель", "лпр"},
+    "average_check": {"средний чек", "чек"},
+    "traffic_source": {"трафик сарафан/входящий", "трафик", "сарафан/входящий", "канал клиентов"},
+    "bot_impression": {"для бота: приятно или не приятно говорить с ботом? да/нет", "приятно говорить с ботом", "реакция на бота"},
+    "dialogue_transcript": {"для бота: транскрибация диалога", "транскрибация диалога", "транскрипт"},
+    "call_summary": {"для бота: саммари разговора", "саммари разговора", "summary"},
     "task": {"task", "задача", "интерес", "need", "потребность"},
     "context": {"context", "prompt_context", "контекст", "комментарий", "comment", "info", "доп информация"},
     "preferred_time": {"preferred_time", "удобное время", "time", "время"},
@@ -392,39 +414,117 @@ def read_xlsx_rows(content: bytes) -> list[dict[str, Any]]:
     return result
 
 
+def normalize_attendance_status(value: Any) -> str:
+    text = normalize_header(value).replace(" ", "")
+    if not text:
+        return "not_attended"
+    if text in {"да", "yes", "y", "1", "пришел", "пришёл", "посетил"}:
+        return "attended"
+    if text in {"нет", "no", "n", "0", "непришел", "непришёл", "непосетил"}:
+        return "not_attended"
+    return safe_text(value).strip()
+
+
+def attendance_label(value: Any) -> str:
+    status = safe_text(value).strip()
+    if status == "attended":
+        return "пришел на мебельный форум Amix"
+    if status == "not_attended":
+        return "не пришел на мебельный форум Amix"
+    return status
+
+
+def compact_context_lines(lines: list[str]) -> str:
+    return "\n".join(line for line in lines if safe_text(line).strip())
+
+
 def normalize_import_rows(rows: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], str]:
     normalized_rows: list[dict[str, Any]] = []
     campaign_context = ""
 
     for raw in rows:
         item: dict[str, Any] = {}
-        raw_clean = {safe_text(k).strip(): v for k, v in raw.items() if safe_text(k).strip()}
+        raw_clean = {safe_text(k).strip(): import_cell_text(v) for k, v in raw.items() if safe_text(k).strip()}
         for key, value in raw_clean.items():
-            item[canonical_column(key)] = safe_text(value).strip()
+            item[canonical_column(key)] = import_cell_text(value)
+
+        first_name = safe_text(item.get("name")).strip()
+        last_name = safe_text(item.get("last_name")).strip()
+        if last_name and first_name and last_name.lower() not in first_name.lower():
+            item["name"] = f"{first_name} {last_name}"
+        elif last_name and not first_name:
+            item["name"] = last_name
 
         phone = normalize_phone(item.get("phone"))
         if not phone:
             continue
         item["phone"] = phone
 
+        if "attendance_status" in item:
+            item["attendance_status"] = normalize_attendance_status(item.get("attendance_status"))
+            item["source"] = item.get("source") or "Форум Amix"
+
+        context_lines: list[str] = []
+        if item.get("attendance_status"):
+            context_lines.append(f"Статус участия: {attendance_label(item.get('attendance_status'))}.")
+        if item.get("activity_type"):
+            context_lines.append(f"Вид деятельности: {item['activity_type']}.")
+        if item.get("is_decision_maker"):
+            context_lines.append(f"Руководитель компании: {item['is_decision_maker']}.")
+        if item.get("average_check"):
+            context_lines.append(f"Средний чек: {item['average_check']}.")
+        if item.get("traffic_source"):
+            context_lines.append(f"Канал клиентов: {item['traffic_source']}.")
+        if item.get("bot_impression"):
+            context_lines.append(f"Оценка разговора с ботом: {item['bot_impression']}.")
+        if item.get("context"):
+            context_lines.append(item["context"])
+        if context_lines:
+            item["context"] = compact_context_lines(context_lines)
+
         if item.get("campaign_context") and not campaign_context:
             campaign_context = safe_text(item.get("campaign_context")).strip()
 
-        item["_raw"] = raw_clean
+        item["_raw"] = {
+            "source_row": raw_clean,
+            "normalized": {k: v for k, v in item.items() if not k.startswith("_")},
+        }
         normalized_rows.append(item)
 
     return normalized_rows, campaign_context
 
 
+def json_dict(value: Any) -> dict[str, Any]:
+    if not value:
+        return {}
+    if isinstance(value, dict):
+        return value
+    try:
+        parsed = json.loads(safe_text(value))
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return {}
+    return parsed if isinstance(parsed, dict) else {}
+
+
 def build_task_context(campaign: Campaign, contact: OutboundContact, task: OutboundTask) -> dict[str, Any]:
+    raw_row = json_dict(contact.raw_row_json)
+    normalized = raw_row.get("normalized") if isinstance(raw_row.get("normalized"), dict) else {}
     return {
         "task_id": task.id,
         "campaign_id": campaign.id,
         "phone": contact.phone,
         "client_name": contact.name or "",
+        "last_name": normalized.get("last_name", ""),
+        "email": normalized.get("email", ""),
         "company": contact.company or "",
         "city": contact.city or "",
         "source": contact.source or "",
+        "attendance_status": normalized.get("attendance_status", ""),
+        "activity_type": normalized.get("activity_type", ""),
+        "is_decision_maker": normalized.get("is_decision_maker", ""),
+        "average_check": normalized.get("average_check", ""),
+        "traffic_source": normalized.get("traffic_source", ""),
+        "bot_impression": normalized.get("bot_impression", ""),
         "task": contact.task or "",
         "context": contact.context or "",
         "preferred_time": contact.preferred_time or "",

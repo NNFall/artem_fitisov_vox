@@ -54,6 +54,22 @@ Optional:
 - `call_after` - earliest call time. Supported examples: `2026-05-17 15:30`, `17.05.2026 15:30`, `2026-05-17`, `17.05.2026`.
 - `max_attempts` - attempts count for this row.
 
+## Amix forum format
+
+The customer workbook format is supported directly:
+
+- `Имя` + `Фамилия` -> client name.
+- `Контактныйтелефон` -> phone.
+- `Компания` -> company.
+- `Пришёл` -> attendance category.
+
+For `Пришёл`, value `ДА` is treated as `attended`; an empty cell is treated as `not_attended`. The scenario uses this to choose the opening line:
+
+- `attended`: "Вы были на мебельном форуме Amix..."
+- `not_attended`: "Вы регистрировались на мебельный форум Amix..."
+
+Manager/bot columns are also imported into lead context when filled: `Вид деятельности`, `Руководитель компании, Да/Нет`, `Средний чек`, `Трафик Сарафан/Входящий`, `Комментарий`, and bot result columns.
+
 Example CSV:
 
 ```csv

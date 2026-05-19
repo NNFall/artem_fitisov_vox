@@ -34,8 +34,10 @@ const WS_RECONNECT_MAX_ATTEMPTS = 1;
 const CALL_RECORD_ENABLED = true;
 const FORCE_OPENING_GREETING = true;
 const OPENING_GREETING_INPUT_UNLOCK_FALLBACK_MS = 7000;
-const OPENING_GREETING_TEXT =
+const OPENING_GREETING_ATTENDED_TEXT =
     'Добрый день! Вы были на мебельном форуме Amix в марте. Меня Екатерина зовут, я AI-помощник, и меня попросили помочь обработать участников. Можно я задам 3-4 вопроса?';
+const OPENING_GREETING_NOT_ATTENDED_TEXT =
+    'Добрый день! Вы регистрировались на мебельный форум Amix в марте. Меня Екатерина зовут, я AI-помощник, и меня попросили помочь обработать базу участников и регистраций. Можно я задам 3-4 вопроса?';
 
 const AI_PRICE_IN_TEXT = 0.5;
 const AI_PRICE_IN_AUDIO = 3.0;
@@ -93,6 +95,13 @@ const buildLeadContextText = (leadContext) => {
     if (!leadContext) return '';
     const lines = [];
     if (leadContext.client_name) lines.push(`- имя клиента: ${leadContext.client_name}`);
+    if (leadContext.attendance_status) {
+        lines.push(
+            `- статус участия в Amix: ${
+                String(leadContext.attendance_status).toLowerCase() === 'attended' ? 'пришел' : 'не пришел'
+            }`
+        );
+    }
     if (leadContext.company) lines.push(`- компания/ниша: ${leadContext.company}`);
     if (leadContext.city) lines.push(`- город: ${leadContext.city}`);
     if (leadContext.source) lines.push(`- источник: ${leadContext.source}`);
@@ -121,7 +130,10 @@ const getLeadFirstName = (leadContext) => {
 const buildOpeningGreetingText = (leadContext) => {
     const firstName = getLeadFirstName(leadContext);
     const namePrefix = firstName ? `${firstName}, ` : '';
-    return `${namePrefix}${OPENING_GREETING_TEXT}`;
+    const attendanceStatus = safeString(leadContext && leadContext.attendance_status).toLowerCase();
+    const greetingText =
+        attendanceStatus === 'not_attended' ? OPENING_GREETING_NOT_ATTENDED_TEXT : OPENING_GREETING_ATTENDED_TEXT;
+    return `${namePrefix}${greetingText}`;
 };
 
 const buildSystemInstruction = (phone, leadContext) => `
@@ -136,6 +148,7 @@ const buildSystemInstruction = (phone, leadContext) => `
 5. В конце поблагодари и тепло попрощайся.
 
 Не уходи в продажу внедрения AI. Не рассказывай длинно про технологии, CRM, интеграции, стоимость и внедрение, если собеседник сам об этом не спросил.
+Если в данных лида статус not_attended, не говори «вы были на форуме»; говори «вы регистрировались на форум» или «были в базе регистраций».
 
 Стартовая реплика:
 «${buildOpeningGreetingText(leadContext)}»
