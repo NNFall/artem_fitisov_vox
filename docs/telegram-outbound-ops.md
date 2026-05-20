@@ -22,17 +22,20 @@ Queue tuning:
 - `OUTBOUND_WORKER_INTERVAL_SECONDS=15` - how often the worker checks the queue.
 - `OUTBOUND_MAX_CONCURRENT_CALLS=1` - simultaneous calls limit.
 - `OUTBOUND_RETRY_DELAY_MINUTES=30` - retry delay setting for failed attempts.
+- `OUTBOUND_DEFAULT_CALL_DELAY_SECONDS=60` - default pause between contacts in a new campaign.
 
 ## Telegram commands
 
 - `/status` - backend, queue, campaign and rule status.
 - `/campaigns` - recent campaigns with counts.
-- `/template` - file format reminder.
+- `/template` or `/upload` - send the empty Amix XLSX template and import instructions.
 - `/run ID` - activate a paused campaign.
-- `/pause ID` - pause a campaign.
+- `/pause ID` or `/stop ID` - pause a campaign.
+- `/delay ID 30s` - set pause between contacts. Examples: `30s`, `45 сек`, `2m`, `2 мин`.
 - `/calls` - last saved calls.
 
 To upload a base, send a `.csv`, `.tsv`, or `.xlsx` document to the bot. New campaigns are created in `paused` status; start them with `/run ID`.
+For each outbound task the bot sends one status message, then edits that same message during the call lifecycle. After finalization it replies to that message with the downloaded audio recording when the file is available locally.
 
 ## Import columns
 
@@ -87,9 +90,27 @@ phone;name;company;source;task;context;preferred_time;campaign_context;call_afte
 6. Voximplant scenario fetches `/outbound/tasks/{task_id}/scenario-context`, dials the contact phone, and injects lead context into the Gemini prompt.
 7. Scenario posts call start, recording status and final call payload back to backend.
 8. Backend stores transcript, summary, costs, statuses and recording metadata in SQLite.
+9. Backend downloads the recording into `backend/recordings` and sends it to Telegram as an audio reply to the task status message.
+10. If `GOOGLE_APPS_SCRIPT_WEBHOOK_URL` is set, backend posts the final payload to Google Apps Script for table updates.
+
+## Google Sheets update
+
+Use `integrations/google_apps_script_amix_webhook.js` as the Apps Script web app for the Amix table. It finds a row by column E (`Контактныйтелефон`) and writes the call result into columns H-P:
+
+- H: reached yes/no.
+- I: activity type.
+- J: decision maker yes/no/unknown.
+- K: average check.
+- L: traffic source.
+- M: outcome, next step and collected answers.
+- N: bot impression.
+- O: transcript.
+- P: summary.
+
+After deploying the script as a web app, set the web app URL in `GOOGLE_APPS_SCRIPT_WEBHOOK_URL`.
 
 ## Recording status
 
 The webhook receives secure Voximplant recording URLs and saves them in SQLite. Local download is attempted into `backend/recordings`.
 
-Current server check: Voximplant returns `HTTP 401` when backend tries to download the secure URL, so `local_recording_path` stays empty and `last_error` contains the download error. This is an access/permission issue for secure recordings, not a queue or webhook issue.
+Secure Voximplant recordings are downloaded with the service account bearer token when the URL contains `voximplant-records-secure`.

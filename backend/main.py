@@ -8,6 +8,7 @@ import re
 import time
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta
+from html import escape
 from pathlib import Path
 from typing import Any, Optional
 from urllib.parse import urlparse
@@ -17,11 +18,12 @@ from aiogram import Bot, Dispatcher, F
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
 from aiogram.filters import Command
-from aiogram.types import Message
+from aiogram.types import FSInputFile, Message
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from dotenv import load_dotenv
 from fastapi import Depends, FastAPI, HTTPException, Path as ApiPath, Query, Request
 from pydantic import BaseModel, Field
+from sqlalchemy import or_
 from sqlalchemy.orm import Session
 
 from database import Call, Campaign, OutboundContact, OutboundTask, SessionLocal
@@ -31,6 +33,8 @@ BASE_DIR = Path(__file__).resolve().parent
 LOG_PATH = BASE_DIR / "backend.log"
 RECORDINGS_DIR = BASE_DIR / "recordings"
 IMPORTS_DIR = BASE_DIR / "imports"
+TEMPLATES_DIR = BASE_DIR / "templates"
+FORUM_AMIX_TEMPLATE_PATH = TEMPLATES_DIR / "forum_amix_template.xlsx"
 
 logging.basicConfig(
     level=logging.INFO,
@@ -54,6 +58,7 @@ OUTBOUND_WORKER_ENABLED = os.getenv("OUTBOUND_WORKER_ENABLED", "true").lower() n
 OUTBOUND_WORKER_INTERVAL_SECONDS = max(5, int(os.getenv("OUTBOUND_WORKER_INTERVAL_SECONDS", "15")))
 OUTBOUND_MAX_CONCURRENT_CALLS = max(1, int(os.getenv("OUTBOUND_MAX_CONCURRENT_CALLS", "1")))
 OUTBOUND_RETRY_DELAY_MINUTES = max(1, int(os.getenv("OUTBOUND_RETRY_DELAY_MINUTES", "30")))
+OUTBOUND_DEFAULT_CALL_DELAY_SECONDS = max(0, int(os.getenv("OUTBOUND_DEFAULT_CALL_DELAY_SECONDS", "60")))
 RECORDINGS_TTL_DAYS = int(os.getenv("RECORDINGS_TTL_DAYS", "30"))
 CLEANUP_INTERVAL_HOURS = int(os.getenv("CLEANUP_INTERVAL_HOURS", "24"))
 DELIVERY_RETRY_ATTEMPTS = max(1, int(os.getenv("DELIVERY_RETRY_ATTEMPTS", "3")))
@@ -64,6 +69,7 @@ VOXIMPLANT_CREDENTIALS_FILE_PATH = os.getenv("VOXIMPLANT_CREDENTIALS_FILE_PATH",
 
 RECORDINGS_DIR.mkdir(parents=True, exist_ok=True)
 IMPORTS_DIR.mkdir(parents=True, exist_ok=True)
+TEMPLATES_DIR.mkdir(parents=True, exist_ok=True)
 
 bot: Optional[Bot] = None
 if TELEGRAM_BOT_TOKEN:
@@ -332,6 +338,80 @@ DEFAULT_NOT_SPECIFIED = "\u043d\u0435 \u0443\u043a\u0430\u0437\u0430\u043d\u043e
 DEFAULT_UNKNOWN = "\u043d\u0435\u0438\u0437\u0432\u0435\u0441\u0442\u043d\u043e"
 DEFAULT_NO_DIALOGUE = "\u0420\u0435\u043f\u043b\u0438\u043a\u0438 \u043d\u0435 \u043d\u0430\u0439\u0434\u0435\u043d\u044b."
 
+AMIX_TEMPLATE_HEADERS = [
+    "",
+    "Имя",
+    "Фамилия",
+    "E-mail",
+    "Контактныйтелефон",
+    "Компания",
+    "Пришёл",
+    "Дозвон Да/Нет",
+    "Вид деятельности",
+    "Руководитель компании, Да/Нет",
+    "Средний чек",
+    "Трафик Сарафан/Входящий",
+    "Комментарий",
+    "Для бота: Приятно или не приятно говорить с Ботом? Да/Нет",
+    "Для бота: Транскрибация диалога",
+    "Для бота: Саммари разговора",
+]
+
+
+def ensure_forum_amix_template() -> Path:
+    if FORUM_AMIX_TEMPLATE_PATH.exists():
+        return FORUM_AMIX_TEMPLATE_PATH
+
+    from openpyxl import Workbook
+    from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
+
+    workbook = Workbook()
+    sheet = workbook.active
+    sheet.title = "Sheet1"
+    sheet.append(AMIX_TEMPLATE_HEADERS)
+
+    header_fill = PatternFill("solid", fgColor="D9EAF7")
+    important_fill = PatternFill("solid", fgColor="FFF2CC")
+    thin = Side(style="thin", color="D9D9D9")
+    border = Border(left=thin, right=thin, top=thin, bottom=thin)
+
+    for cell in sheet[1]:
+        cell.font = Font(bold=True)
+        cell.fill = header_fill
+        cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
+        cell.border = border
+
+    for cell in sheet["G"]:
+        cell.fill = important_fill
+
+    widths = {
+        "A": 8,
+        "B": 16,
+        "C": 18,
+        "D": 26,
+        "E": 20,
+        "F": 26,
+        "G": 12,
+        "H": 16,
+        "I": 24,
+        "J": 28,
+        "K": 16,
+        "L": 24,
+        "M": 44,
+        "N": 36,
+        "O": 42,
+        "P": 42,
+    }
+    for column, width in widths.items():
+        sheet.column_dimensions[column].width = width
+
+    sheet.freeze_panes = "A2"
+    sheet.auto_filter.ref = "A1:P1"
+    sheet.row_dimensions[1].height = 42
+    FORUM_AMIX_TEMPLATE_PATH.parent.mkdir(parents=True, exist_ok=True)
+    workbook.save(FORUM_AMIX_TEMPLATE_PATH)
+    return FORUM_AMIX_TEMPLATE_PATH
+
 
 COLUMN_ALIASES = {
     "phone": {"phone", "tel", "telephone", "номер", "телефон", "номер телефона", "phone_number", "контактный телефон", "контактныйтелефон"},
@@ -542,6 +622,73 @@ def get_campaign_stats(db: Session, campaign_id: int) -> dict[str, int]:
     return stats
 
 
+def parse_delay_seconds(value: Any) -> Optional[int]:
+    text = safe_text(value).strip().lower().replace(",", ".")
+    if not text:
+        return None
+    match = re.fullmatch(r"(\d+(?:\.\d+)?)(s|sec|сек|секунд|m|min|мин|минут)?", text)
+    if not match:
+        return None
+    number = float(match.group(1))
+    unit = match.group(2) or "s"
+    if unit in {"m", "min", "мин", "минут"}:
+        number *= 60
+    return max(0, int(number))
+
+
+def format_delay(seconds: Any) -> str:
+    value = safe_int(seconds) or 0
+    if value >= 60 and value % 60 == 0:
+        return f"{value // 60} мин"
+    return f"{value} сек"
+
+
+def get_campaign_recipients(campaign: Optional[Campaign]) -> list[str]:
+    if campaign and campaign.created_by_chat_id:
+        return [campaign.created_by_chat_id]
+    return get_admin_chat_ids()
+
+
+def display_contact(contact: Optional[OutboundContact], task: Optional[OutboundTask] = None) -> str:
+    if not contact and not task:
+        return "контакт не найден"
+    name = safe_text(contact.name if contact else "").strip()
+    phone = safe_text((contact.phone if contact else None) or (task.phone if task else "")).strip()
+    if name and phone:
+        return f"{name}, {phone}"
+    return name or phone or "контакт не найден"
+
+
+def task_status_text(
+    task: OutboundTask,
+    campaign: Campaign,
+    contact: Optional[OutboundContact],
+    status_text: str,
+    call: Optional[Call] = None,
+) -> str:
+    lines = [
+        f"<b>{escape(status_text)}</b>",
+        f"Кампания: #{campaign.id} {escape(campaign.name)}",
+        f"Задача: #{task.id}",
+        f"Контакт: {escape(display_contact(contact, task))}",
+        f"Статус: {escape(task.status or 'unknown')}",
+        f"Попытка: {task.attempt_count or 0}/{task.max_attempts or 1}",
+    ]
+    if task.voximplant_session_id:
+        lines.append(f"Vox session: <code>{escape(task.voximplant_session_id)}</code>")
+    if call:
+        lines.append(f"Call ID: #{call.id}")
+        if call.duration is not None:
+            lines.append(f"Длительность: {call.duration} сек")
+        if call.outcome:
+            lines.append(f"Итог: {escape(call.outcome)}")
+        if call.summary:
+            lines.append(f"Кратко: {escape(call.summary)}")
+    if task.last_error:
+        lines.append(f"Ошибка: {escape(task.last_error)}")
+    return "\n".join(lines)
+
+
 def render_admin_report(payload: FinalizePayload) -> str:
     usage_text = safe_text(payload.usage).strip() or "{}"
     lines = [
@@ -619,6 +766,114 @@ async def send_telegram_text(chat_ids: list[str], html_text: str) -> tuple[str, 
     if errors:
         return "partial", "; ".join(errors)
     return "sent", None
+
+
+async def send_telegram_status_message(chat_ids: list[str], html_text: str) -> list[tuple[str, int]]:
+    if not chat_ids or not html_text or bot is None:
+        return []
+
+    sent_messages: list[tuple[str, int]] = []
+    for chat_id in chat_ids:
+        try:
+            message = await bot.send_message(
+                chat_id=chat_id,
+                text=html_text,
+                disable_web_page_preview=True,
+            )
+            sent_messages.append((safe_text(chat_id), message.message_id))
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Telegram status send failed for chat=%s: %s", chat_id, str(exc))
+    return sent_messages
+
+
+async def notify_outbound_task(task_id: int, status_text: str) -> tuple[str, Optional[str]]:
+    if bot is None:
+        return "skipped_no_bot", None
+
+    db = SessionLocal()
+    try:
+        task = db.query(OutboundTask).filter(OutboundTask.id == task_id).first()
+        if not task:
+            return "task_not_found", None
+        campaign = db.query(Campaign).filter(Campaign.id == task.campaign_id).first()
+        if not campaign:
+            return "campaign_not_found", None
+        contact = db.query(OutboundContact).filter(OutboundContact.id == task.contact_id).first()
+        call = None
+        if task.voximplant_session_id:
+            call = db.query(Call).filter(Call.voximplant_session_id == task.voximplant_session_id).first()
+
+        html_text = task_status_text(task, campaign, contact, status_text, call)
+        if task.telegram_chat_id and task.telegram_message_id:
+            try:
+                await bot.edit_message_text(
+                    chat_id=task.telegram_chat_id,
+                    message_id=task.telegram_message_id,
+                    text=html_text,
+                    disable_web_page_preview=True,
+                )
+                return "edited", None
+            except Exception as exc:  # noqa: BLE001
+                error_text = str(exc)
+                if "message is not modified" in error_text.lower():
+                    return "edited", None
+                logger.warning(
+                    "Telegram status edit failed task_id=%s chat=%s message=%s: %s",
+                    task.id,
+                    task.telegram_chat_id,
+                    task.telegram_message_id,
+                    error_text,
+                )
+
+        sent_messages = await send_telegram_status_message(get_campaign_recipients(campaign), html_text)
+        if not sent_messages:
+            return "send_failed", "no_message_sent"
+
+        task.telegram_chat_id, task.telegram_message_id = sent_messages[0]
+        task.updated_at = datetime.utcnow()
+        db.commit()
+        return "sent", None
+    finally:
+        db.close()
+
+
+async def send_outbound_recording(task_id: int, local_path: Optional[str]) -> tuple[str, Optional[str]]:
+    if bot is None:
+        return "skipped_no_bot", None
+    if not local_path:
+        return "skipped_no_file", None
+
+    file_path = Path(local_path)
+    if not file_path.exists() or not file_path.is_file():
+        return "file_not_found", local_path
+
+    db = SessionLocal()
+    try:
+        task = db.query(OutboundTask).filter(OutboundTask.id == task_id).first()
+        if not task or not task.telegram_chat_id:
+            return "task_message_not_found", None
+        call = None
+        if task.voximplant_session_id:
+            call = db.query(Call).filter(Call.voximplant_session_id == task.voximplant_session_id).first()
+        caption_lines = [f"Запись звонка по задаче #{task.id}"]
+        if call:
+            caption_lines.append(f"Call ID: #{call.id}")
+            if call.duration is not None:
+                caption_lines.append(f"Длительность: {call.duration} сек")
+        caption = "\n".join(caption_lines)
+
+        await bot.send_audio(
+            chat_id=task.telegram_chat_id,
+            audio=FSInputFile(str(file_path)),
+            caption=caption,
+            reply_to_message_id=task.telegram_message_id,
+        )
+        return "sent", None
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Telegram recording send failed task_id=%s path=%s: %s", task_id, local_path, str(exc))
+        return "error", str(exc)
+    finally:
+        db.close()
 
 
 async def send_to_google_sheets(payload: dict[str, Any]) -> tuple[str, Optional[str]]:
@@ -711,13 +966,13 @@ async def download_recording(url: str, session_id: str) -> tuple[str, Optional[s
     return "download_error", None, last_error or "download_failed"
 
 
-async def persist_recording_download(session_id: str, url: str):
+async def persist_recording_download(session_id: str, url: str) -> tuple[str, Optional[str], Optional[str]]:
     status, local_path, error_text = await download_recording(url, session_id)
     db = SessionLocal()
     try:
         db_call = db.query(Call).filter(Call.voximplant_session_id == session_id).first()
         if not db_call:
-            return
+            return status, local_path, "call_not_found"
         if local_path:
             db_call.local_recording_path = local_path
             db_call.last_error = None
@@ -727,6 +982,7 @@ async def persist_recording_download(session_id: str, url: str):
             db_call.recording_status = status
         db_call.updated_at = datetime.utcnow()
         db.commit()
+        return status, local_path, error_text
     finally:
         db.close()
 
@@ -828,6 +1084,10 @@ def update_outbound_task_from_finalize(db: Session, payload: FinalizePayload):
     task.result_status = payload.outcome or payload.finalization_reason or "finalized"
     task.result_summary = payload.summary
     task.updated_at = now
+    campaign = db.query(Campaign).filter(Campaign.id == task.campaign_id).first()
+    if campaign:
+        campaign.next_call_after = now + timedelta(seconds=safe_int(campaign.call_delay_seconds) or 0)
+        campaign.updated_at = now
 
     retry_reasons = {"call_failed", "call_timeout", "no_gemini_key", "gemini_create_error"}
     if safe_text(payload.finalization_reason) in retry_reasons and (task.attempt_count or 0) < (task.max_attempts or 1):
@@ -866,6 +1126,7 @@ async def start_outbound_task(task_id: int):
         task.last_attempt_at = now
         task.updated_at = now
         db.commit()
+        await notify_outbound_task(task.id, "Начинаю звонок")
 
         custom_data = json.dumps({"task_id": task.id}, ensure_ascii=False)
         result = await asyncio.to_thread(
@@ -879,7 +1140,10 @@ async def start_outbound_task(task_id: int):
         task.started_at = now
         task.voximplant_session_id = safe_text(result.get("call_session_history_id") or "")
         task.updated_at = datetime.utcnow()
+        campaign.next_call_after = datetime.utcnow() + timedelta(seconds=safe_int(campaign.call_delay_seconds) or 0)
+        campaign.updated_at = datetime.utcnow()
         db.commit()
+        await notify_outbound_task(task.id, "Сценарий Voximplant запущен")
         logger.info("Started outbound task id=%s phone=%s", task.id, task.phone)
     except Exception as exc:  # noqa: BLE001
         logger.exception("Failed to start outbound task id=%s", task_id)
@@ -892,6 +1156,7 @@ async def start_outbound_task(task_id: int):
             task.scheduled_at = task.next_attempt_at
             task.updated_at = datetime.utcnow()
             db.commit()
+            await notify_outbound_task(task.id, "Ошибка запуска звонка")
     finally:
         db.close()
 
@@ -916,6 +1181,7 @@ async def process_outbound_queue():
             db.query(OutboundTask)
             .join(Campaign, Campaign.id == OutboundTask.campaign_id)
             .filter(Campaign.status == "active")
+            .filter(or_(Campaign.next_call_after.is_(None), Campaign.next_call_after <= now))
             .filter(OutboundTask.status.in_(["pending", "scheduled"]))
             .filter(OutboundTask.scheduled_at <= now)
             .order_by(OutboundTask.priority.asc(), OutboundTask.scheduled_at.asc(), OutboundTask.id.asc())
@@ -943,6 +1209,7 @@ async def create_campaign_from_rows(
         source_filename=source_filename,
         prompt_context=campaign_context,
         default_max_attempts=1,
+        call_delay_seconds=OUTBOUND_DEFAULT_CALL_DELAY_SECONDS,
         created_by_chat_id=admin_chat_id,
         created_at=datetime.utcnow(),
         updated_at=datetime.utcnow(),
@@ -1004,13 +1271,14 @@ def admin_only(handler):
 async def tg_help(message: Message):
     text = (
         "<b>Управление обзвоном</b>\n\n"
-        "/status - состояние backend и очереди\n"
+        "/upload или /template - получить шаблон таблицы\n"
         "/campaigns - список кампаний\n"
         "/run ID - запустить кампанию\n"
-        "/pause ID - поставить кампанию на паузу\n"
-        "/calls - последние звонки\n"
-        "/template - формат файла для загрузки\n\n"
-        "Для загрузки базы отправьте CSV, TSV или XLSX файл. Обязательная колонка: phone."
+        "/pause ID или /stop ID - остановить кампанию\n"
+        "/delay ID 30s - пауза между контактами\n"
+        "/status - состояние backend и очереди\n"
+        "/calls - последние звонки\n\n"
+        "Для загрузки базы отправьте файл XLSX, CSV или TSV. После загрузки кампания создаётся на паузе."
     )
     await message.answer(text)
 
@@ -1041,6 +1309,7 @@ async def tg_status(message: Message):
                 f"Ошибок: {failed}",
                 f"Worker: {'включен' if OUTBOUND_WORKER_ENABLED else 'выключен'}",
                 f"Rule ID: {VOXIMPLANT_RULE_ID or 'не задан'}",
+                f"Пауза по умолчанию: {format_delay(OUTBOUND_DEFAULT_CALL_DELAY_SECONDS)}",
             ]
         )
     )
@@ -1056,11 +1325,15 @@ async def tg_campaigns(message: Message):
         lines = ["<b>Кампании</b>"]
         for campaign in campaigns:
             stats = get_campaign_stats(db, campaign.id)
+            next_call = ""
+            if campaign.next_call_after and campaign.next_call_after > datetime.utcnow():
+                next_call = f", следующий старт после {campaign.next_call_after.strftime('%H:%M:%S')}"
             lines.append(
                 f"#{campaign.id} {campaign.name} - {campaign.status}; "
                 f"total={stats.get('total', 0)}, pending={stats.get('pending', 0)}, "
                 f"active={stats.get('started', 0) + stats.get('starting', 0) + stats.get('in_progress', 0)}, "
-                f"done={stats.get('completed', 0)}, failed={stats.get('failed', 0)}"
+                f"done={stats.get('completed', 0)}, failed={stats.get('failed', 0)}, "
+                f"delay={format_delay(campaign.call_delay_seconds)}{next_call}"
             )
     finally:
         db.close()
@@ -1083,26 +1356,61 @@ async def tg_run_or_pause(message: Message, status: str):
         campaign.updated_at = datetime.utcnow()
         if status == "active":
             campaign.started_at = datetime.utcnow()
+            campaign.next_call_after = None
         else:
             campaign.paused_at = datetime.utcnow()
         db.commit()
         stats = get_campaign_stats(db, campaign.id)
     finally:
         db.close()
-    await message.answer(f"Кампания #{campaign_id}: {status}. Задач: {stats.get('total', 0)}, в очереди: {stats.get('pending', 0)}.")
+    action = "запущена" if status == "active" else "остановлена"
+    await message.answer(
+        f"Кампания #{campaign_id} {action}. "
+        f"Задач: {stats.get('total', 0)}, в очереди: {stats.get('pending', 0)}."
+    )
+
+
+async def tg_delay(message: Message):
+    parts = safe_text(message.text).split(maxsplit=2)
+    if len(parts) < 3 or not parts[1].isdigit():
+        await message.answer("Укажите ID кампании и паузу, например: /delay 1 30s или /delay 1 2m")
+        return
+
+    delay_seconds = parse_delay_seconds(parts[2])
+    if delay_seconds is None:
+        await message.answer("Не понял паузу. Примеры: 30s, 45 сек, 2m, 2 мин.")
+        return
+
+    campaign_id = int(parts[1])
+    db = SessionLocal()
+    try:
+        campaign = db.query(Campaign).filter(Campaign.id == campaign_id).first()
+        if not campaign:
+            await message.answer(f"Кампания #{campaign_id} не найдена.")
+            return
+        campaign.call_delay_seconds = delay_seconds
+        campaign.updated_at = datetime.utcnow()
+        db.commit()
+    finally:
+        db.close()
+
+    await message.answer(f"Кампания #{campaign_id}: пауза между контактами {format_delay(delay_seconds)}.")
 
 
 async def tg_template(message: Message):
-    await message.answer(
-        "<b>Формат файла</b>\n\n"
-        "Обязательная колонка:\n"
-        "phone\n\n"
-        "Опциональные колонки:\n"
-        "name, company, city, source, task, context, preferred_time, timezone, call_after, max_attempts, campaign_context\n\n"
-        "Пример CSV:\n"
-        "<code>phone;name;company;task;context;preferred_time;campaign_context\n"
-        "79990000000;Иван;Ромашка;AI для входящих звонков;Есть заявки с сайта;после 16:00;Лиды после мероприятия</code>"
+    template_path = ensure_forum_amix_template()
+    caption = (
+        "<b>Шаблон базы обзвона</b>\n\n"
+        "Поддерживаемые форматы: XLSX, CSV, TSV.\n"
+        "Для Amix используем этот шаблон: до G - данные от организатора, после G - поля менеджера и результат прозвона.\n\n"
+        "Ключевые колонки:\n"
+        "E: Контактныйтелефон\n"
+        "G: Пришёл - важно, по нему выбирается начало скрипта\n"
+        "B/C/F: имя, фамилия, компания\n"
+        "I-P: поля, которые бот может учитывать и потом заполнять через Google Sheets webhook.\n\n"
+        "Отправьте заполненный файл сюда. Кампания создастся на паузе, запуск: /run ID."
     )
+    await message.answer_document(FSInputFile(str(template_path)), caption=caption)
 
 
 async def tg_calls(message: Message):
@@ -1168,8 +1476,10 @@ async def tg_document(message: Message):
     await message.answer(
         f"База загружена: кампания #{campaign.id}\n"
         f"Контактов: {stats.get('total', 0)}\n"
-        f"Статус: paused\n\n"
-        f"Запуск: /run {campaign.id}"
+        f"Статус: paused\n"
+        f"Пауза между контактами: {format_delay(campaign.call_delay_seconds)}\n\n"
+        f"Запуск: /run {campaign.id}\n"
+        f"Изменить паузу: /delay {campaign.id} 30s"
     )
 
 
@@ -1183,7 +1493,9 @@ def setup_telegram_dispatcher():
     dispatcher.message.register(admin_only(tg_campaigns), Command("campaigns"))
     dispatcher.message.register(admin_only(lambda message: tg_run_or_pause(message, "active")), Command("run"))
     dispatcher.message.register(admin_only(lambda message: tg_run_or_pause(message, "paused")), Command("pause"))
-    dispatcher.message.register(admin_only(tg_template), Command("template"))
+    dispatcher.message.register(admin_only(lambda message: tg_run_or_pause(message, "paused")), Command("stop"))
+    dispatcher.message.register(admin_only(tg_delay), Command("delay", "interval"))
+    dispatcher.message.register(admin_only(tg_template), Command("template", "upload"))
     dispatcher.message.register(admin_only(tg_calls), Command("calls"))
     dispatcher.message.register(admin_only(tg_document), F.document)
 
@@ -1192,6 +1504,7 @@ def setup_telegram_dispatcher():
 async def lifespan(app: FastAPI):
     global telegram_polling_task
     logger.info("Artem Fitisov backend starting")
+    ensure_forum_amix_template()
     scheduler.add_job(cleanup_old_recordings, "interval", hours=CLEANUP_INTERVAL_HOURS)
     scheduler.add_job(process_outbound_queue, "interval", seconds=OUTBOUND_WORKER_INTERVAL_SECONDS)
     scheduler.start()
@@ -1357,6 +1670,8 @@ async def call_started(
             task.started_at = db_call.connected_at or datetime.utcnow()
             task.updated_at = datetime.utcnow()
     db.commit()
+    if payload.outbound_task_id:
+        asyncio.create_task(notify_outbound_task(payload.outbound_task_id, "Соединение установлено"))
 
     return {"status": "success", "session_id": payload.session_id}
 
@@ -1446,12 +1761,27 @@ async def finalize_call(
     update_outbound_task_from_finalize(db, payload)
     db.commit()
 
+    recording_download_status = None
+    recording_download_error = None
+    local_recording_path = None
     if payload.recording_url:
-        asyncio.create_task(persist_recording_download(payload.session_id, payload.recording_url))
+        recording_download_status, local_recording_path, recording_download_error = await persist_recording_download(
+            payload.session_id,
+            payload.recording_url,
+        )
+        if local_recording_path:
+            db_call.local_recording_path = local_recording_path
+            db_call.recording_status = recording_download_status
+            db_call.last_error = None
+            db_call.updated_at = datetime.utcnow()
+            db.commit()
 
     if is_diagnostic_finalize(payload):
         admin_status, admin_error = "skipped_diagnostic", None
         summary_status, summary_error = "skipped_diagnostic", None
+    elif payload.outbound_task_id:
+        admin_status, admin_error = "skipped_outbound_task", None
+        summary_status, summary_error = "skipped_outbound_task", None
     else:
         admin_status, admin_error = await send_telegram_text(
             get_admin_chat_ids(),
@@ -1477,12 +1807,31 @@ async def finalize_call(
     db_call.updated_at = datetime.utcnow()
     db.commit()
 
+    recording_send_status = None
+    recording_send_error = None
+    if payload.outbound_task_id:
+        await notify_outbound_task(payload.outbound_task_id, "Звонок завершен")
+        recording_send_status, recording_send_error = await send_outbound_recording(
+            payload.outbound_task_id,
+            local_recording_path or db_call.local_recording_path,
+        )
+        if recording_send_error:
+            logger.warning(
+                "Outbound recording delivery failed task_id=%s status=%s error=%s",
+                payload.outbound_task_id,
+                recording_send_status,
+                recording_send_error,
+            )
+
     return {
         "status": "success",
         "session_id": payload.session_id,
         "telegram_admin_status": admin_status,
         "telegram_summary_status": summary_status,
         "google_sheets_status": sheets_status,
+        "recording_download_status": recording_download_status,
+        "recording_download_error": recording_download_error,
+        "recording_send_status": recording_send_status,
     }
 
 

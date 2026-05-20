@@ -206,6 +206,11 @@ const buildSystemInstruction = (phone, leadContext) => `
 — client_phone: номер, обычно ${phone};
 — call_goal: коротко, что это был опрос участника форума Amix;
 — manager_offer: не оффер продажи, а собранные ответы: производство/дизайн, роль, средний чек, канал клиентов, отношение к AI-разговору;
+— activity_type: мебельное производство, дизайн или другой профиль, если выяснили;
+— is_decision_maker: да/нет/неизвестно, руководитель ли собеседник;
+— average_check: средний чек словами или числом, если назвали;
+— traffic_source: реклама, сарафан, входящие, смешанный канал или неизвестно;
+— bot_impression: как собеседник воспринял разговор с AI;
 — outcome: итог: ответил, отказался, попросил перезвонить, разговор сорвался;
 — next_step: что делать дальше, например «данные собраны», «перезвонить», «не беспокоить»;
 — summary: 2-4 предложения с главным результатом разговора.
@@ -472,6 +477,11 @@ VoxEngine.addEventListener(AppEvents.Started, async () => {
                 client_phone: targetPhone,
                 call_goal: '',
                 manager_offer: '',
+                activity_type: '',
+                is_decision_maker: '',
+                average_check: '',
+                traffic_source: '',
+                bot_impression: '',
                 outcome: '',
                 next_step: '',
                 summary: ''
@@ -705,6 +715,11 @@ VoxEngine.addEventListener(AppEvents.Started, async () => {
 - client_phone
 - call_goal
 - manager_offer
+- activity_type
+- is_decision_maker
+- average_check
+- traffic_source
+- bot_impression
 - outcome
 - next_step
 - summary
@@ -951,6 +966,11 @@ VoxEngine.addEventListener(AppEvents.Started, async () => {
                                             client_phone: { type: 'string' },
                                             call_goal: { type: 'string' },
                                             manager_offer: { type: 'string' },
+                                            activity_type: { type: 'string' },
+                                            is_decision_maker: { type: 'string' },
+                                            average_check: { type: 'string' },
+                                            traffic_source: { type: 'string' },
+                                            bot_impression: { type: 'string' },
                                             outcome: { type: 'string' },
                                             next_step: { type: 'string' },
                                             summary: { type: 'string' }
@@ -1004,6 +1024,11 @@ VoxEngine.addEventListener(AppEvents.Started, async () => {
                     session.summaryData.client_phone = normalizeText(args.client_phone || targetPhone);
                     session.summaryData.call_goal = clipText(args.call_goal, 300);
                     session.summaryData.manager_offer = clipText(args.manager_offer, 300);
+                    session.summaryData.activity_type = clipText(args.activity_type, 200);
+                    session.summaryData.is_decision_maker = clipText(args.is_decision_maker, 100);
+                    session.summaryData.average_check = clipText(args.average_check, 120);
+                    session.summaryData.traffic_source = clipText(args.traffic_source, 160);
+                    session.summaryData.bot_impression = clipText(args.bot_impression, 200);
                     session.summaryData.outcome = clipText(args.outcome, 200);
                     session.summaryData.next_step = clipText(args.next_step, 200);
                     session.summaryData.summary = clipText(args.summary, 500);

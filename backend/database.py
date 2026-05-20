@@ -124,6 +124,8 @@ class Campaign(Base):
     source_filename = Column(String, nullable=True)
     prompt_context = Column(Text, nullable=True)
     default_max_attempts = Column(Integer, default=1, nullable=True)
+    call_delay_seconds = Column(Integer, default=60, nullable=True)
+    next_call_after = Column(DateTime, nullable=True)
     created_by_chat_id = Column(String, index=True, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow, nullable=True)
     updated_at = Column(DateTime, default=datetime.utcnow, nullable=True)
@@ -138,6 +140,8 @@ class Campaign(Base):
             "source_filename": self.source_filename,
             "prompt_context": self.prompt_context,
             "default_max_attempts": self.default_max_attempts,
+            "call_delay_seconds": self.call_delay_seconds,
+            "next_call_after": self.next_call_after.isoformat() if self.next_call_after else None,
             "created_by_chat_id": self.created_by_chat_id,
             "created_at": self.created_at.isoformat() if self.created_at else None,
             "updated_at": self.updated_at.isoformat() if self.updated_at else None,
@@ -199,6 +203,8 @@ class OutboundTask(Base):
     attempt_count = Column(Integer, default=0, nullable=True)
     max_attempts = Column(Integer, default=1, nullable=True)
     voximplant_session_id = Column(String, index=True, nullable=True)
+    telegram_chat_id = Column(String, nullable=True)
+    telegram_message_id = Column(Integer, nullable=True)
     start_result_json = Column(Text, nullable=True)
     result_status = Column(String, nullable=True)
     result_summary = Column(Text, nullable=True)
@@ -222,6 +228,8 @@ class OutboundTask(Base):
             "attempt_count": self.attempt_count,
             "max_attempts": self.max_attempts,
             "voximplant_session_id": self.voximplant_session_id,
+            "telegram_chat_id": self.telegram_chat_id,
+            "telegram_message_id": self.telegram_message_id,
             "result_status": self.result_status,
             "result_summary": self.result_summary,
             "last_error": self.last_error,
@@ -268,22 +276,41 @@ SQLITE_CALLS_COLUMNS = {
     "last_error": "TEXT",
 }
 
+SQLITE_EXTRA_COLUMNS = {
+    "campaigns": {
+        "call_delay_seconds": "INTEGER",
+        "next_call_after": "DATETIME",
+    },
+    "outbound_tasks": {
+        "telegram_chat_id": "TEXT",
+        "telegram_message_id": "INTEGER",
+    },
+}
+
 
 def ensure_sqlite_columns():
     if engine.url.get_backend_name() != "sqlite":
         return
 
     inspector = inspect(engine)
-    if "calls" not in inspector.get_table_names():
-        return
-
-    existing_columns = {column["name"] for column in inspector.get_columns("calls")}
+    tables = set(inspector.get_table_names())
 
     with engine.begin() as connection:
-        for column_name, column_type in SQLITE_CALLS_COLUMNS.items():
-            if column_name in existing_columns:
+        if "calls" in tables:
+            existing_columns = {column["name"] for column in inspector.get_columns("calls")}
+            for column_name, column_type in SQLITE_CALLS_COLUMNS.items():
+                if column_name in existing_columns:
+                    continue
+                connection.execute(text(f"ALTER TABLE calls ADD COLUMN {column_name} {column_type}"))
+
+        for table_name, columns in SQLITE_EXTRA_COLUMNS.items():
+            if table_name not in tables:
                 continue
-            connection.execute(text(f"ALTER TABLE calls ADD COLUMN {column_name} {column_type}"))
+            existing_columns = {column["name"] for column in inspector.get_columns(table_name)}
+            for column_name, column_type in columns.items():
+                if column_name in existing_columns:
+                    continue
+                connection.execute(text(f"ALTER TABLE {table_name} ADD COLUMN {column_name} {column_type}"))
 
 
 Base.metadata.create_all(bind=engine)
