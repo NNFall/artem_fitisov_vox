@@ -28,6 +28,7 @@ const NEXT_CALL_DELAY_MS = 1000;
 const CALL_TIMEOUT_MS = 60 * 1000;
 const MAX_CALL_DURATION_MS = 5 * 60 * 1000;
 const SUMMARY_REQUEST_TIMEOUT_MS = 15000;
+const TASK_CONTEXT_FETCH_TIMEOUT_MS = 3500;
 const WEBSOCKET_PRICE_PER_MINUTE_RUB = 0.5;
 const WS_RECONNECT_DELAY_MS = 1200;
 const WS_RECONNECT_MAX_ATTEMPTS = 1;
@@ -329,6 +330,40 @@ VoxEngine.addEventListener(AppEvents.Started, async () => {
         );
     };
 
+    const getStatusTaskId = () =>
+        scenarioCustomData.task_id ||
+        scenarioCustomData.outbound_task_id ||
+        (leadContext && leadContext.task_id);
+
+    const getStatusCampaignId = () =>
+        scenarioCustomData.campaign_id ||
+        (leadContext && leadContext.campaign_id);
+
+    const sendStatus = (stage, message, data, session) => {
+        const taskId = getStatusTaskId();
+        const campaignId = getStatusCampaignId();
+        const statusPhone =
+            (session && session.targetPhone) ||
+            (leadContext && leadContext.phone) ||
+            scenarioCustomData.phone ||
+            '';
+        sendToBackend(
+            '/webhook/voximplant/status',
+            {
+                stage,
+                status: 'ok',
+                message: safeString(message),
+                session_id: session && session.sessionId ? session.sessionId : undefined,
+                outbound_task_id: taskId ? Number(taskId) : undefined,
+                campaign_id: campaignId ? Number(campaignId) : undefined,
+                phone: normalizePhone(statusPhone),
+                timestamp_utc: new Date().toISOString(),
+                data: data || {}
+            },
+            `STATUS:${stage}`
+        );
+    };
+
     const fetchTaskContext = (taskId) =>
         new Promise((resolve) => {
             if (!backendUrl || !taskId) {
@@ -341,6 +376,22 @@ VoxEngine.addEventListener(AppEvents.Started, async () => {
                 return;
             }
 
+            let settled = false;
+            const finish = (value) => {
+                if (settled) return;
+                settled = true;
+                clearTimeout(timeoutTimer);
+                resolve(value);
+            };
+            const timeoutTimer = setTimeout(() => {
+                Logger.write('===TASK_CONTEXT_FETCH_TIMEOUT===');
+                sendStatus('context_fetch_timeout', 'Backend не успел отдать контекст, использую custom_data', {
+                    task_id: taskId,
+                    timeout_ms: TASK_CONTEXT_FETCH_TIMEOUT_MS
+                });
+                finish(null);
+            }, TASK_CONTEXT_FETCH_TIMEOUT_MS);
+
             const options = {
                 method: 'GET',
                 headers: {}
@@ -349,17 +400,19 @@ VoxEngine.addEventListener(AppEvents.Started, async () => {
                 options.headers['X-Webhook-Secret'] = backendWebhookSecret;
             }
 
+            sendStatus('context_fetch_start', 'Запрашиваю контекст задачи у backend', { task_id: taskId });
             Net.httpRequest(
                 `${backendUrl}/outbound/tasks/${encodeURIComponent(taskId)}/scenario-context`,
                 (res) => {
                     Logger.write(`===TASK_CONTEXT_FETCH_DONE code=${res.code}===`);
                     if (!res || res.code < 200 || res.code >= 300) {
                         Logger.write(safeString(res && res.text));
-                        resolve(null);
+                        finish(null);
                         return;
                     }
                     const parsed = parseJsonMaybe(safeString(res.text));
-                    resolve(parsed);
+                    sendStatus('context_fetch_done', 'Контекст задачи получен от backend', { task_id: taskId });
+                    finish(parsed);
                 },
                 options
             );
@@ -407,7 +460,14 @@ VoxEngine.addEventListener(AppEvents.Started, async () => {
         );
 
         const taskId = custom.task_id || custom.outbound_task_id || directContext.task_id;
-        if (taskId) {
+        const directPhone = normalizePhone(directContext.phone || custom.phone || '');
+        if (directPhone) {
+            leadContext = directContext;
+            sendStatus('context_skipped_custom_data', 'Контекст и номер взяты из script_custom_data', {
+                task_id: taskId,
+                phone: directPhone
+            });
+        } else if (taskId) {
             const fetchedContext = await fetchTaskContext(taskId);
             leadContext = mergeLeadContext(directContext, fetchedContext);
         } else {
@@ -417,6 +477,11 @@ VoxEngine.addEventListener(AppEvents.Started, async () => {
         const customPhone = normalizePhone(leadContext.phone || custom.phone || '');
         if (customPhone) targets = [customPhone];
         Logger.write(`===LEAD_CONTEXT:${safeJson(leadContext)}===`);
+        sendStatus('lead_context_ready', 'Контекст лида готов', {
+            has_phone: Boolean(customPhone),
+            phone: customPhone,
+            client_name: leadContext.client_name || ''
+        });
     };
 
     const closeGeminiClient = () => {
@@ -680,6 +745,7 @@ VoxEngine.addEventListener(AppEvents.Started, async () => {
 
         const sendRecordingReady = (tag) => {
             if (!session.recordingUrl) return;
+            sendStatus('recording_ready', 'Запись разговора готова', { tag, recording_status: getRecordingStatus() }, session);
             sendToBackend(
                 '/webhook/voximplant/recording_ready',
                 {
@@ -700,6 +766,7 @@ VoxEngine.addEventListener(AppEvents.Started, async () => {
             if (finishingCurrentCall) return;
             finishingCurrentCall = true;
             session.finalizationReason = reason;
+            sendStatus('finalize_start', `Финализирую звонок: ${reason}`, { reason, should_hangup: shouldHangup }, session);
 
             activeCallTimer = clearTimer(activeCallTimer);
             callTimeoutTimer = clearTimer(callTimeoutTimer);
@@ -722,6 +789,7 @@ VoxEngine.addEventListener(AppEvents.Started, async () => {
                 ensureDialogueFinalized();
                 const payload = buildFinalizePayload();
                 sendToBackend('/webhook/voximplant/finalize', payload, 'FINALIZE', () => {
+                    sendStatus('finalize_sent', 'Итоги звонка отправлены на backend', { reason }, session);
                     session.done = true;
                     closeGeminiClient();
                     activeCall = null;
@@ -738,6 +806,7 @@ VoxEngine.addEventListener(AppEvents.Started, async () => {
             }
 
             session.summaryRequestSent = true;
+            sendStatus('summary_request', 'Запрашиваю summary у AI', {}, session);
             try {
                 sendUserTextToModel(
                     activeGeminiClient,
@@ -843,6 +912,7 @@ VoxEngine.addEventListener(AppEvents.Started, async () => {
                 session.openingGreetingDone = true;
                 session.openingUnlockTimer = clearTimer(session.openingUnlockTimer);
                 Logger.write(`===CALLER_INPUT_CONNECTED:${reason}===`);
+                sendStatus('caller_input_enabled', 'Микрофон абонента подключен к AI', { reason }, session);
             } catch (e) {
                 Logger.write('===CALLER_INPUT_CONNECT_ERROR===');
                 Logger.write(String(e));
@@ -853,6 +923,7 @@ VoxEngine.addEventListener(AppEvents.Started, async () => {
                     session.openingGreetingDone = true;
                     session.openingUnlockTimer = clearTimer(session.openingUnlockTimer);
                     Logger.write(`===FULL_MEDIA_BRIDGE_FALLBACK:${reason}===`);
+                    sendStatus('caller_input_enabled', 'Медиа между абонентом и AI подключено fallback-методом', { reason }, session);
                 } catch (fallbackError) {
                     Logger.write('===FULL_MEDIA_BRIDGE_FALLBACK_ERROR===');
                     Logger.write(String(fallbackError));
@@ -900,6 +971,7 @@ VoxEngine.addEventListener(AppEvents.Started, async () => {
             sendUserTextToModel(client, promptText, 'opening_greeting');
             session.startPromptSent = true;
             Logger.write(`===OPENING_GREETING_SENT:${reason}===`);
+            sendStatus('opening_greeting_sent', 'Приветствие отправлено в AI', { reason }, session);
 
             session.openingUnlockTimer = setTimeout(() => {
                 Logger.write('===OPENING_GREETING_UNLOCK_FALLBACK===');
@@ -930,13 +1002,16 @@ VoxEngine.addEventListener(AppEvents.Started, async () => {
             if (session.geminiWarmupStarted || activeGeminiClient) return;
             session.geminiWarmupStarted = true;
             Logger.write(`===GEMINI_WARMUP_START:${reason}===`);
+            sendStatus('gemini_warmup_start', 'Подключаю AI', { reason }, session);
             try {
                 activeGeminiClient = await createGeminiClient();
                 Logger.write(`===GEMINI_WARMUP_DONE:${reason}===`);
+                sendStatus('gemini_ready', 'AI подключен', { reason }, session);
                 maybeStartOpeningGreeting(`${reason}_warmup_done`);
             } catch (e) {
                 Logger.write('===GEMINI_CREATE_ERROR===');
                 Logger.write(String(e));
+                sendStatus('gemini_error', safeString(e), { reason }, session);
                 if (session.callConnected) finishAndContinue('gemini_create_error', true);
             }
         };
@@ -1135,7 +1210,16 @@ VoxEngine.addEventListener(AppEvents.Started, async () => {
         };
 
         Logger.write(`===OUTBOUND_DIAL_START:${targetPhone}===`);
-        activeCall = VoxEngine.callPSTN(targetPhone, callerId);
+        sendStatus('dial_start', 'Начинаю набор номера', { target_phone: targetPhone, caller_id: callerId }, session);
+        try {
+            activeCall = VoxEngine.callPSTN(targetPhone, callerId);
+        } catch (e) {
+            Logger.write('===CALL_PSTN_ERROR===');
+            Logger.write(String(e));
+            sendStatus('dial_error', safeString(e), { target_phone: targetPhone, caller_id: callerId }, session);
+            finishAndContinue('dial_error', false);
+            return;
+        }
         startGeminiWarmup('after_dial');
         try {
             if (activeCall && activeCall.id) session.sessionId = safeString(activeCall.id());
@@ -1146,12 +1230,14 @@ VoxEngine.addEventListener(AppEvents.Started, async () => {
 
         callTimeoutTimer = setTimeout(() => {
             Logger.write(`===CALL_TIMEOUT:${targetPhone}===`);
+            sendStatus('call_timeout', 'Абонент не ответил за таймаут', { target_phone: targetPhone }, session);
             finishAndContinue('call_timeout', true);
         }, CALL_TIMEOUT_MS);
 
         activeCall.addEventListener(CallEvents.Connected, async (event) => {
             Logger.write(`===CALL_CONNECTED:${targetPhone}===`);
             Logger.write(safeJson(event));
+            sendStatus('call_connected', 'Абонент взял трубку', { target_phone: targetPhone }, session);
             session.callConnected = true;
             session.connectedAtUtc = new Date().toISOString();
             callTimeoutTimer = clearTimer(callTimeoutTimer);
@@ -1182,11 +1268,13 @@ VoxEngine.addEventListener(AppEvents.Started, async () => {
                     session.recordingRequested = true;
                     activeCall.record({ hd_audio: true, stereo: true });
                     Logger.write('===CALL_RECORD_START_REQUESTED===');
+                    sendStatus('recording_requested', 'Запрошена запись разговора', {}, session);
                 } catch (e) {
                     session.recordingFailed = true;
                     session.recordingErrorText = safeString(e);
                     Logger.write('===CALL_RECORD_START_ERROR===');
                     Logger.write(String(e));
+                    sendStatus('recording_failed', safeString(e), {}, session);
                 }
             }
 
@@ -1199,6 +1287,7 @@ VoxEngine.addEventListener(AppEvents.Started, async () => {
             Logger.write(safeJson(event));
             session.recordingStarted = true;
             session.recordingUrl = safeString(event && event.url);
+            sendStatus('recording_ready', 'Запись разговора началась', { record_event: 'started' }, session);
             sendRecordingReady('record_started');
         });
 
@@ -1209,6 +1298,7 @@ VoxEngine.addEventListener(AppEvents.Started, async () => {
                 const url = safeString(event && event.url);
                 if (url) {
                     session.recordingUrl = url;
+                    sendStatus('recording_ready', 'Запись разговора остановлена и готова', { record_event: 'stopped' }, session);
                     sendRecordingReady('record_stopped');
                 }
             });
@@ -1220,12 +1310,14 @@ VoxEngine.addEventListener(AppEvents.Started, async () => {
                 Logger.write(safeJson(event));
                 session.recordingFailed = true;
                 session.recordingErrorText = safeString((event && (event.reason || event.error || event.message)) || 'record_error');
+                sendStatus('recording_failed', session.recordingErrorText, {}, session);
             });
         }
 
         activeCall.addEventListener(CallEvents.Disconnected, (event) => {
             Logger.write(`===CALL_DISCONNECTED:${targetPhone}===`);
             Logger.write(safeJson(event));
+            sendStatus('call_disconnected', 'Звонок завершен', { target_phone: targetPhone }, session);
             if (event && event.duration !== undefined) session.callDurationSec = toNumber(event.duration);
             if (event && event.cost !== undefined) session.telephonyCostRub = toNumber(event.cost);
             finishAndContinue('call_disconnected', false);
@@ -1234,6 +1326,7 @@ VoxEngine.addEventListener(AppEvents.Started, async () => {
         activeCall.addEventListener(CallEvents.Failed, (event) => {
             Logger.write(`===CALL_FAILED:${targetPhone}===`);
             Logger.write(safeJson(event));
+            sendStatus('call_failed', 'Звонок не состоялся', { target_phone: targetPhone, event }, session);
             if (event && event.duration !== undefined) session.callDurationSec = toNumber(event.duration);
             if (event && event.cost !== undefined) session.telephonyCostRub = toNumber(event.cost);
             finishAndContinue('call_failed', false);
@@ -1246,6 +1339,14 @@ VoxEngine.addEventListener(AppEvents.Started, async () => {
         return;
     }
 
+    sendStatus('scenario_started', 'Сценарий стартовал в Voximplant', {
+        has_custom_data: Object.keys(scenarioCustomData || {}).length > 0
+    });
+    sendStatus('custom_data_loaded', 'Данные задачи прочитаны из custom_data', {
+        task_id: scenarioCustomData.task_id || scenarioCustomData.outbound_task_id || '',
+        phone: normalizePhone(scenarioCustomData.phone || '')
+    });
+
     await loadLeadContextFromCustomData();
 
     if (!targets.length) {
@@ -1256,6 +1357,7 @@ VoxEngine.addEventListener(AppEvents.Started, async () => {
             (leadContext && leadContext.task_id);
         const campaignId = scenarioCustomData.campaign_id || (leadContext && leadContext.campaign_id);
         if (taskId) {
+            sendStatus('empty_call_target', 'Номер клиента не передан в сценарий', { task_id: taskId });
             let terminated = false;
             const terminateOnce = () => {
                 if (terminated) return;

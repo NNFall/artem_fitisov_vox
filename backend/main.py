@@ -26,7 +26,7 @@ from pydantic import BaseModel, Field
 from sqlalchemy import or_
 from sqlalchemy.orm import Session
 
-from database import Call, Campaign, OutboundContact, OutboundTask, SessionLocal
+from database import Call, Campaign, OutboundContact, OutboundEvent, OutboundTask, SessionLocal
 from voximplant.apiclient import VoximplantAPI
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -134,6 +134,18 @@ class RecordingReadyPayload(BaseModel):
     recording_url: str
     recording_status: Optional[str] = None
     recording_error: Optional[str] = None
+
+
+class VoximplantStatusPayload(BaseModel):
+    stage: str
+    status: Optional[str] = None
+    message: Optional[str] = None
+    session_id: Optional[str] = None
+    outbound_task_id: Optional[int] = None
+    campaign_id: Optional[int] = None
+    phone: Optional[str] = None
+    timestamp_utc: Optional[str] = None
+    data: dict[str, Any] = Field(default_factory=dict)
 
 
 class CallReportPayload(BaseModel):
@@ -673,6 +685,40 @@ def display_contact(contact: Optional[OutboundContact], task: Optional[OutboundT
     return name or phone or "контакт не найден"
 
 
+STATUS_LABELS = {
+    "scenario_started": "Сценарий Voximplant запущен",
+    "custom_data_loaded": "Данные задачи получены в сценарии",
+    "context_fetch_start": "Сценарий запрашивает контекст задачи",
+    "context_fetch_done": "Контекст задачи получен",
+    "context_fetch_timeout": "Таймаут получения контекста задачи",
+    "context_skipped_custom_data": "Контекст взят из custom_data",
+    "lead_context_ready": "Контекст лида готов",
+    "empty_call_target": "Номер для звонка не найден",
+    "dial_start": "Начинаю набор номера",
+    "dial_error": "Ошибка набора номера",
+    "call_timeout": "Абонент не ответил за таймаут",
+    "call_connected": "Абонент взял трубку",
+    "recording_requested": "Запись разговора запрошена",
+    "recording_ready": "Запись разговора готова",
+    "recording_failed": "Ошибка записи разговора",
+    "gemini_warmup_start": "Подключаю AI",
+    "gemini_ready": "AI подключен",
+    "gemini_error": "Ошибка AI",
+    "opening_greeting_sent": "Приветствие отправлено",
+    "caller_input_enabled": "Микрофон абонента подключен к AI",
+    "summary_request": "Запрошена суммаризация",
+    "finalize_start": "Финализирую звонок",
+    "finalize_sent": "Итоги отправлены на backend",
+    "call_disconnected": "Звонок завершен",
+    "call_failed": "Звонок не состоялся",
+}
+
+
+def status_label(stage: str, fallback: Optional[str] = None) -> str:
+    clean_stage = safe_text(stage).strip()
+    return fallback or STATUS_LABELS.get(clean_stage, clean_stage or "Статус звонка обновлен")
+
+
 def task_status_text(
     task: OutboundTask,
     campaign: Campaign,
@@ -690,6 +736,10 @@ def task_status_text(
     ]
     if task.voximplant_session_id:
         lines.append(f"Vox session: <code>{escape(task.voximplant_session_id)}</code>")
+    if task.last_status:
+        lines.append(f"Этап: {escape(status_label(task.last_status))}")
+    if task.last_status_message:
+        lines.append(f"Детали: {escape(task.last_status_message)}")
     if call:
         lines.append(f"Call ID: #{call.id}")
         if call.duration is not None:
@@ -1687,6 +1737,59 @@ def get_scenario_context(
         raise HTTPException(status_code=404, detail="context not found")
 
     return build_task_context(campaign, contact, task)
+
+
+@app.post("/webhook/voximplant/status")
+async def voximplant_status(
+    payload: VoximplantStatusPayload,
+    request: Request,
+    db: Session = Depends(get_db),
+):
+    require_webhook_secret(request)
+
+    now = parse_iso_datetime(payload.timestamp_utc) or datetime.utcnow()
+    stage = safe_text(payload.stage).strip() or "unknown"
+    message = safe_text(payload.message).strip()
+    payload_json = to_json_text(payload.model_dump(mode="json"))
+
+    event = OutboundEvent(
+        campaign_id=payload.campaign_id,
+        task_id=payload.outbound_task_id,
+        session_id=safe_text(payload.session_id).strip() or None,
+        phone=normalize_phone(payload.phone),
+        stage=stage,
+        status=safe_text(payload.status).strip() or None,
+        message=message or None,
+        payload_json=payload_json,
+        created_at=now,
+    )
+    db.add(event)
+
+    task = None
+    if payload.outbound_task_id:
+        task = db.query(OutboundTask).filter(OutboundTask.id == payload.outbound_task_id).first()
+    if not task and payload.session_id:
+        task = db.query(OutboundTask).filter(OutboundTask.voximplant_session_id == payload.session_id).first()
+
+    if task:
+        task.last_status = stage
+        task.last_status_message = message or None
+        task.last_status_at = now
+        task.last_status_payload_json = payload_json
+        if payload.session_id and not task.voximplant_session_id:
+            task.voximplant_session_id = payload.session_id
+        task.updated_at = datetime.utcnow()
+        if stage in {"dial_error", "empty_call_target"}:
+            task.last_error = message or stage
+        if stage == "call_connected" and task.status in {"starting", "started"}:
+            task.status = "in_progress"
+
+    db.commit()
+
+    if task:
+        asyncio.create_task(notify_outbound_task(task.id, status_label(stage, message or None)))
+
+    return {"status": "success", "stage": stage, "event_id": event.id}
 
 
 @app.post("/webhook/voximplant/call_started")

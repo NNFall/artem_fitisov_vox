@@ -206,6 +206,10 @@ class OutboundTask(Base):
     telegram_chat_id = Column(String, nullable=True)
     telegram_message_id = Column(Integer, nullable=True)
     start_result_json = Column(Text, nullable=True)
+    last_status = Column(String, nullable=True)
+    last_status_message = Column(Text, nullable=True)
+    last_status_at = Column(DateTime, nullable=True)
+    last_status_payload_json = Column(Text, nullable=True)
     result_status = Column(String, nullable=True)
     result_summary = Column(Text, nullable=True)
     last_error = Column(Text, nullable=True)
@@ -230,11 +234,43 @@ class OutboundTask(Base):
             "voximplant_session_id": self.voximplant_session_id,
             "telegram_chat_id": self.telegram_chat_id,
             "telegram_message_id": self.telegram_message_id,
+            "last_status": self.last_status,
+            "last_status_message": self.last_status_message,
+            "last_status_at": self.last_status_at.isoformat() if self.last_status_at else None,
             "result_status": self.result_status,
             "result_summary": self.result_summary,
             "last_error": self.last_error,
             "created_at": self.created_at.isoformat() if self.created_at else None,
             "updated_at": self.updated_at.isoformat() if self.updated_at else None,
+        }
+
+
+class OutboundEvent(Base):
+    __tablename__ = "outbound_events"
+
+    id = Column(Integer, primary_key=True, index=True)
+    campaign_id = Column(Integer, index=True, nullable=True)
+    task_id = Column(Integer, index=True, nullable=True)
+    session_id = Column(String, index=True, nullable=True)
+    phone = Column(String, index=True, nullable=True)
+    stage = Column(String, index=True, nullable=False)
+    status = Column(String, index=True, nullable=True)
+    message = Column(Text, nullable=True)
+    payload_json = Column(Text, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow, index=True, nullable=True)
+
+    def as_dict(self):
+        return {
+            "id": self.id,
+            "campaign_id": self.campaign_id,
+            "task_id": self.task_id,
+            "session_id": self.session_id,
+            "phone": self.phone,
+            "stage": self.stage,
+            "status": self.status,
+            "message": self.message,
+            "payload_json": self.payload_json,
+            "created_at": self.created_at.isoformat() if self.created_at else None,
         }
 
 
@@ -284,6 +320,10 @@ SQLITE_EXTRA_COLUMNS = {
     "outbound_tasks": {
         "telegram_chat_id": "TEXT",
         "telegram_message_id": "INTEGER",
+        "last_status": "TEXT",
+        "last_status_message": "TEXT",
+        "last_status_at": "DATETIME",
+        "last_status_payload_json": "TEXT",
     },
 }
 
