@@ -230,12 +230,6 @@ function applySheetLayout_(sheet) {
     columnRange.setHorizontalAlignment(column.align || 'left');
   });
 
-  sheet.setRowHeight(TITLE_ROW, UNIFIED_ROW_HEIGHT);
-  sheet.setRowHeight(HEADER_ROW, UNIFIED_ROW_HEIGHT);
-  if (sheet.getLastRow() >= DATA_START_ROW) {
-    sheet.setRowHeights(DATA_START_ROW, sheet.getLastRow() - DATA_START_ROW + 1, UNIFIED_ROW_HEIGHT);
-  }
-
   sheet.getRange(DATA_START_ROW, PHONE_COLUMN, dataRowCount, 1).setNumberFormat('@');
   sheet.getRange(DATA_START_ROW, RESULT_COLUMNS_START, dataRowCount, RESULT_COLUMNS_END - RESULT_COLUMNS_START + 1).setBackground('#f8fafc');
   sheet.getRange(DATA_START_ROW, getColumnIndexByKey_('attended'), dataRowCount, 1).setBackground('#fff7ed');
@@ -255,6 +249,20 @@ function applySheetLayout_(sheet) {
     .createFilter();
 
   dataRange.setBorder(false, false, true, false, false, false, '#e5e7eb', SpreadsheetApp.BorderStyle.SOLID);
+  setFixedRowHeights_(sheet, TITLE_ROW, 1, UNIFIED_ROW_HEIGHT);
+  setFixedRowHeights_(sheet, HEADER_ROW, 1, UNIFIED_ROW_HEIGHT);
+  if (sheet.getLastRow() >= DATA_START_ROW) {
+    setFixedRowHeights_(sheet, DATA_START_ROW, sheet.getLastRow() - DATA_START_ROW + 1, UNIFIED_ROW_HEIGHT);
+  }
+}
+
+function setFixedRowHeights_(sheet, startRow, rowCount, height) {
+  if (rowCount < 1) return;
+  if (typeof sheet.setRowHeightsForced === 'function') {
+    sheet.setRowHeightsForced(startRow, rowCount, height);
+    return;
+  }
+  sheet.setRowHeights(startRow, rowCount, height);
 }
 
 function applyDataValidation_(sheet) {
