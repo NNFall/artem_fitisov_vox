@@ -18,7 +18,7 @@ from aiogram import Bot, Dispatcher, F
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
 from aiogram.filters import Command
-from aiogram.types import FSInputFile, Message
+from aiogram.types import BotCommand, FSInputFile, Message
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from dotenv import load_dotenv
 from fastapi import Depends, FastAPI, HTTPException, Path as ApiPath, Query, Request
@@ -84,6 +84,20 @@ scheduler = AsyncIOScheduler()
 dispatcher: Optional[Dispatcher] = None
 telegram_polling_task: Optional[asyncio.Task] = None
 voximplant_api_client: Optional[VoximplantAPI] = None
+
+TELEGRAM_BOT_COMMANDS = [
+    BotCommand(command="help", description="показать справку"),
+    BotCommand(command="upload", description="получить шаблон и инструкцию загрузки"),
+    BotCommand(command="template", description="получить XLSX-шаблон базы"),
+    BotCommand(command="campaigns", description="список кампаний"),
+    BotCommand(command="run", description="запустить кампанию: /run ID"),
+    BotCommand(command="pause", description="поставить кампанию на паузу: /pause ID"),
+    BotCommand(command="stop", description="остановить кампанию: /stop ID"),
+    BotCommand(command="delay", description="пауза между контактами: /delay ID 30s"),
+    BotCommand(command="status", description="статус backend и очереди"),
+    BotCommand(command="calls", description="последние звонки"),
+    BotCommand(command="setcommands", description="обновить меню команд"),
+]
 
 if VOXIMPLANT_CREDENTIALS_FILE_PATH:
     try:
@@ -1271,6 +1285,7 @@ def admin_only(handler):
 async def tg_help(message: Message):
     text = (
         "<b>Управление обзвоном</b>\n\n"
+        "/help - эта справка\n"
         "/upload или /template - получить шаблон таблицы\n"
         "/campaigns - список кампаний\n"
         "/run ID - запустить кампанию\n"
@@ -1281,6 +1296,26 @@ async def tg_help(message: Message):
         "Для загрузки базы отправьте файл XLSX, CSV или TSV. После загрузки кампания создаётся на паузе."
     )
     await message.answer(text)
+
+
+async def configure_telegram_commands() -> tuple[str, Optional[str]]:
+    if bot is None:
+        return "skipped_no_bot", None
+    try:
+        await bot.set_my_commands(TELEGRAM_BOT_COMMANDS)
+        logger.info("Telegram bot commands configured")
+        return "configured", None
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Telegram set_my_commands failed: %s", str(exc))
+        return "error", str(exc)
+
+
+async def tg_setcommands(message: Message):
+    status, error_text = await configure_telegram_commands()
+    if status == "configured":
+        await message.answer("Меню команд Telegram обновлено.")
+    else:
+        await message.answer(f"Не удалось обновить команды: {error_text or status}")
 
 
 async def tg_status(message: Message):
@@ -1497,6 +1532,7 @@ def setup_telegram_dispatcher():
     dispatcher.message.register(admin_only(tg_delay), Command("delay", "interval"))
     dispatcher.message.register(admin_only(tg_template), Command("template", "upload"))
     dispatcher.message.register(admin_only(tg_calls), Command("calls"))
+    dispatcher.message.register(admin_only(tg_setcommands), Command("setcommands"))
     dispatcher.message.register(admin_only(tg_document), F.document)
 
 
@@ -1510,6 +1546,7 @@ async def lifespan(app: FastAPI):
     scheduler.start()
     setup_telegram_dispatcher()
     if dispatcher is not None and bot is not None:
+        await configure_telegram_commands()
         telegram_polling_task = asyncio.create_task(dispatcher.start_polling(bot))
         logger.info("Telegram bot polling started")
     yield
