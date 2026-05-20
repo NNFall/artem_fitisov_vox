@@ -65,6 +65,7 @@ DELIVERY_RETRY_ATTEMPTS = max(1, int(os.getenv("DELIVERY_RETRY_ATTEMPTS", "3")))
 DELIVERY_RETRY_DELAY_MS = max(100, int(os.getenv("DELIVERY_RETRY_DELAY_MS", "700")))
 DOWNLOAD_RETRY_ATTEMPTS = max(1, int(os.getenv("DOWNLOAD_RETRY_ATTEMPTS", "3")))
 DOWNLOAD_RETRY_DELAY_MS = max(100, int(os.getenv("DOWNLOAD_RETRY_DELAY_MS", "1200")))
+RECORDING_DOWNLOAD_RETRY_DELAYS_SECONDS_STR = os.getenv("RECORDING_DOWNLOAD_RETRY_DELAYS_SECONDS", "0,30,60,180")
 VOXIMPLANT_CREDENTIALS_FILE_PATH = os.getenv("VOXIMPLANT_CREDENTIALS_FILE_PATH", "").strip()
 
 RECORDINGS_DIR.mkdir(parents=True, exist_ok=True)
@@ -301,6 +302,15 @@ def backoff_seconds(base_delay_ms: int, attempt: int) -> float:
 
 async def wait_before_retry(base_delay_ms: int, attempt: int):
     await asyncio.sleep(backoff_seconds(base_delay_ms, attempt))
+
+
+def recording_download_retry_delays_seconds() -> list[int]:
+    delays: list[int] = []
+    for item in RECORDING_DOWNLOAD_RETRY_DELAYS_SECONDS_STR.split(","):
+        value = safe_int(item.strip())
+        if value is not None and value >= 0:
+            delays.append(value)
+    return delays or [0, 30, 60, 180]
 
 
 def get_admin_chat_ids() -> list[str]:
@@ -670,9 +680,8 @@ def format_delay(seconds: Any) -> str:
 
 
 def get_campaign_recipients(campaign: Optional[Campaign]) -> list[str]:
-    if campaign and campaign.created_by_chat_id:
-        return [campaign.created_by_chat_id]
-    return get_admin_chat_ids()
+    created_by = [campaign.created_by_chat_id] if campaign and campaign.created_by_chat_id else []
+    return dedupe(get_admin_chat_ids() + normalize_chat_ids(",".join(created_by)))
 
 
 def display_contact(contact: Optional[OutboundContact], task: Optional[OutboundTask] = None) -> str:
@@ -850,6 +859,47 @@ async def send_telegram_status_message(chat_ids: list[str], html_text: str) -> l
     return sent_messages
 
 
+def parse_task_message_refs(task: OutboundTask) -> list[dict[str, Any]]:
+    refs: list[dict[str, Any]] = []
+    raw = safe_text(task.telegram_message_refs_json).strip()
+    if raw:
+        try:
+            parsed = json.loads(raw)
+        except json.JSONDecodeError:
+            parsed = []
+        if isinstance(parsed, list):
+            for item in parsed:
+                if not isinstance(item, dict):
+                    continue
+                chat_id = safe_text(item.get("chat_id")).strip()
+                message_id = safe_int(item.get("message_id"))
+                if chat_id and message_id:
+                    refs.append({"chat_id": chat_id, "message_id": message_id})
+
+    if task.telegram_chat_id and task.telegram_message_id:
+        refs.append({"chat_id": safe_text(task.telegram_chat_id), "message_id": task.telegram_message_id})
+
+    unique: dict[str, dict[str, Any]] = {}
+    for ref in refs:
+        unique[safe_text(ref["chat_id"])] = ref
+    return list(unique.values())
+
+
+def save_task_message_refs(task: OutboundTask, refs: list[dict[str, Any]]):
+    unique: dict[str, dict[str, Any]] = {}
+    for ref in refs:
+        chat_id = safe_text(ref.get("chat_id")).strip()
+        message_id = safe_int(ref.get("message_id"))
+        if chat_id and message_id:
+            unique[chat_id] = {"chat_id": chat_id, "message_id": message_id}
+
+    clean_refs = list(unique.values())
+    task.telegram_message_refs_json = json.dumps(clean_refs, ensure_ascii=False) if clean_refs else None
+    if clean_refs:
+        task.telegram_chat_id = clean_refs[0]["chat_id"]
+        task.telegram_message_id = clean_refs[0]["message_id"]
+
+
 async def notify_outbound_task(task_id: int, status_text: str) -> tuple[str, Optional[str]]:
     if bot is None:
         return "skipped_no_bot", None
@@ -868,34 +918,53 @@ async def notify_outbound_task(task_id: int, status_text: str) -> tuple[str, Opt
             call = db.query(Call).filter(Call.voximplant_session_id == task.voximplant_session_id).first()
 
         html_text = task_status_text(task, campaign, contact, status_text, call)
-        if task.telegram_chat_id and task.telegram_message_id:
+        recipients = get_campaign_recipients(campaign)
+        refs = parse_task_message_refs(task)
+        kept_refs: list[dict[str, Any]] = []
+        failed_chat_ids: set[str] = set()
+
+        for ref in refs:
             try:
                 await bot.edit_message_text(
-                    chat_id=task.telegram_chat_id,
-                    message_id=task.telegram_message_id,
+                    chat_id=ref["chat_id"],
+                    message_id=ref["message_id"],
                     text=html_text,
                     disable_web_page_preview=True,
                 )
-                return "edited", None
+                kept_refs.append(ref)
             except Exception as exc:  # noqa: BLE001
                 error_text = str(exc)
                 if "message is not modified" in error_text.lower():
-                    return "edited", None
+                    kept_refs.append(ref)
+                    continue
                 logger.warning(
                     "Telegram status edit failed task_id=%s chat=%s message=%s: %s",
                     task.id,
-                    task.telegram_chat_id,
-                    task.telegram_message_id,
+                    ref["chat_id"],
+                    ref["message_id"],
                     error_text,
                 )
+                failed_chat_ids.add(safe_text(ref["chat_id"]))
 
-        sent_messages = await send_telegram_status_message(get_campaign_recipients(campaign), html_text)
-        if not sent_messages:
+        edited_chat_ids = {safe_text(ref["chat_id"]) for ref in kept_refs}
+        missing_chat_ids = [
+            chat_id for chat_id in recipients
+            if chat_id not in edited_chat_ids or chat_id in failed_chat_ids
+        ]
+
+        sent_messages = await send_telegram_status_message(missing_chat_ids, html_text)
+        sent_refs = [{"chat_id": chat_id, "message_id": message_id} for chat_id, message_id in sent_messages]
+        all_refs = kept_refs + sent_refs
+        if not all_refs:
             return "send_failed", "no_message_sent"
 
-        task.telegram_chat_id, task.telegram_message_id = sent_messages[0]
+        save_task_message_refs(task, all_refs)
         task.updated_at = datetime.utcnow()
         db.commit()
+        if kept_refs and sent_refs:
+            return "edited_and_sent", None
+        if kept_refs:
+            return "edited", None
         return "sent", None
     finally:
         db.close()
@@ -914,8 +983,9 @@ async def send_outbound_recording(task_id: int, local_path: Optional[str]) -> tu
     db = SessionLocal()
     try:
         task = db.query(OutboundTask).filter(OutboundTask.id == task_id).first()
-        if not task or not task.telegram_chat_id:
-            return "task_message_not_found", None
+        if not task:
+            return "task_not_found", None
+        campaign = db.query(Campaign).filter(Campaign.id == task.campaign_id).first()
         call = None
         if task.voximplant_session_id:
             call = db.query(Call).filter(Call.voximplant_session_id == task.voximplant_session_id).first()
@@ -926,13 +996,33 @@ async def send_outbound_recording(task_id: int, local_path: Optional[str]) -> tu
                 caption_lines.append(f"Длительность: {call.duration} сек")
         caption = "\n".join(caption_lines)
 
-        await bot.send_audio(
-            chat_id=task.telegram_chat_id,
-            audio=FSInputFile(str(file_path)),
-            caption=caption,
-            reply_to_message_id=task.telegram_message_id,
-        )
-        return "sent", None
+        refs = parse_task_message_refs(task)
+        if not refs:
+            refs = [{"chat_id": chat_id, "message_id": None} for chat_id in get_campaign_recipients(campaign)]
+        if not refs:
+            return "task_message_not_found", None
+
+        errors: list[str] = []
+        sent_count = 0
+        for ref in refs:
+            try:
+                kwargs: dict[str, Any] = {
+                    "chat_id": ref["chat_id"],
+                    "audio": FSInputFile(str(file_path)),
+                    "caption": caption,
+                }
+                if ref.get("message_id"):
+                    kwargs["reply_to_message_id"] = ref["message_id"]
+                await bot.send_audio(**kwargs)
+                sent_count += 1
+            except Exception as exc:  # noqa: BLE001
+                errors.append(f"{ref.get('chat_id')}: {str(exc)}")
+
+        if sent_count and errors:
+            return "partial", "; ".join(errors)
+        if sent_count:
+            return "sent", None
+        return "error", "; ".join(errors) or "no_audio_sent"
     except Exception as exc:  # noqa: BLE001
         logger.warning("Telegram recording send failed task_id=%s path=%s: %s", task_id, local_path, str(exc))
         return "error", str(exc)
@@ -1000,7 +1090,18 @@ async def download_recording(url: str, session_id: str) -> tuple[str, Optional[s
             )
 
     last_error = ""
-    for attempt in range(1, DOWNLOAD_RETRY_ATTEMPTS + 1):
+    retry_delays = recording_download_retry_delays_seconds()
+    total_attempts = len(retry_delays)
+    for attempt, delay_seconds in enumerate(retry_delays, start=1):
+        if delay_seconds > 0:
+            logger.info(
+                "Waiting %s sec before recording download retry session=%s attempt=%s/%s",
+                delay_seconds,
+                session_id,
+                attempt,
+                total_attempts,
+            )
+            await asyncio.sleep(delay_seconds)
         try:
             timeout = aiohttp.ClientTimeout(total=60)
             async with aiohttp.ClientSession(timeout=timeout) as session:
@@ -1016,16 +1117,14 @@ async def download_recording(url: str, session_id: str) -> tuple[str, Optional[s
                             return "downloaded", str(file_path), None
         except Exception as exc:  # noqa: BLE001
             last_error = str(exc)
-            logger.warning(
-                "Recording download failed session=%s attempt=%s/%s: %s",
-                session_id,
-                attempt,
-                DOWNLOAD_RETRY_ATTEMPTS,
-                last_error,
-            )
 
-        if attempt < DOWNLOAD_RETRY_ATTEMPTS:
-            await wait_before_retry(DOWNLOAD_RETRY_DELAY_MS, attempt)
+        logger.warning(
+            "Recording download failed session=%s attempt=%s/%s: %s",
+            session_id,
+            attempt,
+            total_attempts,
+            last_error,
+        )
 
     return "download_error", None, last_error or "download_failed"
 
@@ -1049,6 +1148,30 @@ async def persist_recording_download(session_id: str, url: str) -> tuple[str, Op
         return status, local_path, error_text
     finally:
         db.close()
+
+
+async def persist_and_send_outbound_recording(task_id: int, session_id: str, url: str):
+    status, local_path, error_text = await persist_recording_download(session_id, url)
+    if local_path:
+        await notify_outbound_task(task_id, "Запись скачана, отправляю аудио")
+        send_status, send_error = await send_outbound_recording(task_id, local_path)
+        if send_error:
+            logger.warning(
+                "Outbound recording send failed task_id=%s status=%s error=%s",
+                task_id,
+                send_status,
+                send_error,
+            )
+        return
+
+    logger.warning(
+        "Outbound recording download failed task_id=%s session=%s status=%s error=%s",
+        task_id,
+        session_id,
+        status,
+        error_text,
+    )
+    await notify_outbound_task(task_id, f"Запись не скачалась: {error_text or status}")
 
 
 async def cleanup_old_recordings():
@@ -1872,7 +1995,8 @@ async def recording_ready(
     db_call.updated_at = datetime.utcnow()
     db.commit()
 
-    asyncio.create_task(persist_recording_download(payload.session_id, payload.recording_url))
+    if not payload.outbound_task_id:
+        asyncio.create_task(persist_recording_download(payload.session_id, payload.recording_url))
     return {"status": "success", "session_id": payload.session_id}
 
 
@@ -1919,17 +2043,28 @@ async def finalize_call(
     recording_download_status = None
     recording_download_error = None
     local_recording_path = None
-    if payload.recording_url:
-        recording_download_status, local_recording_path, recording_download_error = await persist_recording_download(
-            payload.session_id,
-            payload.recording_url,
-        )
-        if local_recording_path:
-            db_call.local_recording_path = local_recording_path
-            db_call.recording_status = recording_download_status
-            db_call.last_error = None
-            db_call.updated_at = datetime.utcnow()
-            db.commit()
+    recording_url_for_download = payload.recording_url or db_call.recording_url
+    if recording_url_for_download:
+        if payload.outbound_task_id:
+            recording_download_status = "scheduled"
+            asyncio.create_task(
+                persist_and_send_outbound_recording(
+                    payload.outbound_task_id,
+                    payload.session_id,
+                    recording_url_for_download,
+                )
+            )
+        else:
+            recording_download_status, local_recording_path, recording_download_error = await persist_recording_download(
+                payload.session_id,
+                recording_url_for_download,
+            )
+            if local_recording_path:
+                db_call.local_recording_path = local_recording_path
+                db_call.recording_status = recording_download_status
+                db_call.last_error = None
+                db_call.updated_at = datetime.utcnow()
+                db.commit()
 
     if is_diagnostic_finalize(payload):
         admin_status, admin_error = "skipped_diagnostic", None
@@ -1966,17 +2101,7 @@ async def finalize_call(
     recording_send_error = None
     if payload.outbound_task_id:
         await notify_outbound_task(payload.outbound_task_id, "Звонок завершен")
-        recording_send_status, recording_send_error = await send_outbound_recording(
-            payload.outbound_task_id,
-            local_recording_path or db_call.local_recording_path,
-        )
-        if recording_send_error:
-            logger.warning(
-                "Outbound recording delivery failed task_id=%s status=%s error=%s",
-                payload.outbound_task_id,
-                recording_send_status,
-                recording_send_error,
-            )
+        recording_send_status = "scheduled" if recording_url_for_download else "skipped_no_recording_url"
 
     return {
         "status": "success",

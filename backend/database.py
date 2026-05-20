@@ -205,6 +205,7 @@ class OutboundTask(Base):
     voximplant_session_id = Column(String, index=True, nullable=True)
     telegram_chat_id = Column(String, nullable=True)
     telegram_message_id = Column(Integer, nullable=True)
+    telegram_message_refs_json = Column(Text, nullable=True)
     start_result_json = Column(Text, nullable=True)
     last_status = Column(String, nullable=True)
     last_status_message = Column(Text, nullable=True)
@@ -234,6 +235,7 @@ class OutboundTask(Base):
             "voximplant_session_id": self.voximplant_session_id,
             "telegram_chat_id": self.telegram_chat_id,
             "telegram_message_id": self.telegram_message_id,
+            "telegram_message_refs_json": self.telegram_message_refs_json,
             "last_status": self.last_status,
             "last_status_message": self.last_status_message,
             "last_status_at": self.last_status_at.isoformat() if self.last_status_at else None,
@@ -320,6 +322,7 @@ SQLITE_EXTRA_COLUMNS = {
     "outbound_tasks": {
         "telegram_chat_id": "TEXT",
         "telegram_message_id": "INTEGER",
+        "telegram_message_refs_json": "TEXT",
         "last_status": "TEXT",
         "last_status_message": "TEXT",
         "last_status_at": "DATETIME",
