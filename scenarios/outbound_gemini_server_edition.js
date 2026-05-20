@@ -11,9 +11,9 @@ require(Modules.ApplicationStorage);
  */
 
 const CALLER_ID = '79014172420';
-const CALL_TARGETS = [
-    '79958407752'
-];
+// Keep empty for backend-driven campaigns. Phone numbers must come from
+// VoxEngine.customData or /outbound/tasks/{id}/scenario-context.
+const FALLBACK_CALL_TARGETS = [];
 
 const BACKEND_URL_FALLBACK = 'http://186.246.18.100:8001';
 const BACKEND_WEBHOOK_SECRET_FALLBACK = '';
@@ -248,7 +248,7 @@ ${buildLeadContextText(leadContext)}
 `;
 
 VoxEngine.addEventListener(AppEvents.Started, async () => {
-    let targets = CALL_TARGETS.map(normalizePhone).filter((phone) => phone.length > 0);
+    let targets = FALLBACK_CALL_TARGETS.map(normalizePhone).filter((phone) => phone.length > 0);
     const callerId = normalizePhone(CALLER_ID);
     let scenarioCustomData = {};
     let leadContext = {};
@@ -1242,6 +1242,43 @@ VoxEngine.addEventListener(AppEvents.Started, async () => {
 
     if (!targets.length) {
         Logger.write('===EMPTY_CALL_TARGETS===');
+        const taskId =
+            scenarioCustomData.task_id ||
+            scenarioCustomData.outbound_task_id ||
+            (leadContext && leadContext.task_id);
+        const campaignId = scenarioCustomData.campaign_id || (leadContext && leadContext.campaign_id);
+        if (taskId) {
+            let terminated = false;
+            const terminateOnce = () => {
+                if (terminated) return;
+                terminated = true;
+                VoxEngine.terminate();
+            };
+            sendToBackend(
+                '/webhook/voximplant/finalize',
+                {
+                    session_id: `empty-target-${Date.now()}`,
+                    project: PROJECT_NAME,
+                    script_name: SCRIPT_NAME,
+                    outbound_task_id: Number(taskId),
+                    campaign_id: campaignId ? Number(campaignId) : undefined,
+                    exported_at_utc: new Date().toISOString(),
+                    finalization_reason: 'empty_call_target',
+                    model: GEMINI_MODEL,
+                    caller_phone: callerId,
+                    client_phone: safeString(leadContext && leadContext.phone),
+                    client_name: safeString(leadContext && (leadContext.client_name || leadContext.name)),
+                    summary: 'Сценарий завершился без звонка: номер клиента не был передан в сценарий.',
+                    outcome: 'Ошибка запуска: номер клиента не передан в сценарий.',
+                    next_step: 'Проверить script_custom_data и /scenario-context перед повторным запуском.',
+                    recording_status: 'not_started'
+                },
+                'EMPTY_CALL_TARGETS',
+                terminateOnce
+            );
+            setTimeout(terminateOnce, 3000);
+            return;
+        }
         VoxEngine.terminate();
         return;
     }

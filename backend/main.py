@@ -1103,13 +1103,20 @@ def update_outbound_task_from_finalize(db: Session, payload: FinalizePayload):
         campaign.next_call_after = now + timedelta(seconds=safe_int(campaign.call_delay_seconds) or 0)
         campaign.updated_at = now
 
-    retry_reasons = {"call_failed", "call_timeout", "no_gemini_key", "gemini_create_error"}
-    if safe_text(payload.finalization_reason) in retry_reasons and (task.attempt_count or 0) < (task.max_attempts or 1):
+    failed_reasons = {"call_failed", "call_timeout", "no_gemini_key", "gemini_create_error", "empty_call_target"}
+    finalization_reason = safe_text(payload.finalization_reason)
+    if finalization_reason in failed_reasons and (task.attempt_count or 0) < (task.max_attempts or 1):
         retry_at = now + timedelta(minutes=OUTBOUND_RETRY_DELAY_MINUTES)
         task.status = "pending"
         task.next_attempt_at = retry_at
         task.scheduled_at = retry_at
-        task.last_error = payload.finalization_reason
+        task.last_error = finalization_reason
+        return
+
+    if finalization_reason in failed_reasons:
+        task.status = "failed"
+        task.finished_at = now
+        task.last_error = finalization_reason
         return
 
     task.status = "completed"
@@ -1133,6 +1140,14 @@ async def start_outbound_task(task_id: int):
         campaign = db.query(Campaign).filter(Campaign.id == task.campaign_id).first()
         if not campaign or campaign.status != "active":
             return
+        contact = db.query(OutboundContact).filter(OutboundContact.id == task.contact_id).first()
+        if not contact:
+            task.status = "failed"
+            task.last_error = "contact_not_found"
+            task.updated_at = datetime.utcnow()
+            db.commit()
+            await notify_outbound_task(task.id, "Контакт не найден")
+            return
 
         now = datetime.utcnow()
         task.status = "starting"
@@ -1142,7 +1157,7 @@ async def start_outbound_task(task_id: int):
         db.commit()
         await notify_outbound_task(task.id, "Начинаю звонок")
 
-        custom_data = json.dumps({"task_id": task.id}, ensure_ascii=False)
+        custom_data = json.dumps(build_task_context(campaign, contact, task), ensure_ascii=False)
         result = await asyncio.to_thread(
             voximplant_api_client.start_scenarios,
             rule_id=int(VOXIMPLANT_RULE_ID),
