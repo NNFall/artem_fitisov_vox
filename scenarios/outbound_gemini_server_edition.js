@@ -197,7 +197,7 @@ const buildSystemInstruction = (phone, leadContext) => `
 2. «Вы руководитель компании, как я понимаю?»
 3. «Подскажите, а какой у вас средний чек?»
 4. «А у вас в основном по рекламе клиенты обращаются или по сарафану?»
-5. В конце спроси: «И можете оценить по 10-балльной шкале, насколько вам было комфортно со мной общаться? Где 1 — совсем некомфортно, а 10 — очень комфортно.»
+5. В конце спроси коротко: «И последний короткий вопрос: от 1 до 10, насколько комфортно вам было со мной общаться?»
 
 Если имя известно, можно обращаться по имени, но не в каждой фразе.
 Если человек уже ответил по смыслу, не переспрашивай дословно. Лучше коротко подтверди и иди дальше.
@@ -626,6 +626,27 @@ VoxEngine.addEventListener(AppEvents.Started, async () => {
             return session.dialogue
                 .map((item) => `${item.role === 'user' ? 'Клиент' : 'AI'}: ${item.text}`)
                 .join('\n');
+        };
+
+        const formatRecentDialogueText = (limit) => {
+            ensureDialogueFinalized();
+            return session.dialogue
+                .slice(-limit)
+                .map((item) => `${item.role === 'user' ? 'Клиент' : 'AI'}: ${item.text}`)
+                .join('\n');
+        };
+
+        const buildReconnectPrompt = () => {
+            const recentDialogue = formatRecentDialogueText(12);
+            return `Связь с AI только что временно оборвалась и восстановилась. НЕ начинай разговор заново. НЕ здоровайся заново. НЕ повторяй стартовую реплику про форум Amix.
+
+Клиент сейчас слышал обрыв, поэтому сначала коротко скажи: «Да, простите, кажется связь на секунду прервалась».
+
+Дальше продолжи строго с последнего незавершенного места. Если последний незавершенный вопрос был про оценку, повтори только его одной короткой фразой:
+«И последний короткий вопрос: от 1 до 10, насколько комфортно вам было со мной общаться?»
+
+Последние реплики до обрыва:
+${recentDialogue || 'Истории реплик нет. Просто извинись за обрыв и спроси последний незавершенный вопрос.'}`;
         };
 
         const getRecordingStatus = () => {
@@ -1147,11 +1168,7 @@ VoxEngine.addEventListener(AppEvents.Started, async () => {
                 session.geminiReady = true;
                 if (session.startPromptSent) {
                     connectFullMediaAfterReconnect(client);
-                    sendUserTextToModel(
-                        client,
-                        'Соединение восстановлено. Продолжай разговор естественно с того места, где остановились. Не здоровайся заново.',
-                        'reconnect_prompt'
-                    );
+                    sendUserTextToModel(client, buildReconnectPrompt(), 'reconnect_prompt');
                     Logger.write('===RECONNECT_PROMPT_SENT===');
                     return;
                 }
