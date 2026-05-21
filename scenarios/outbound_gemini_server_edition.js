@@ -25,7 +25,7 @@ const GEMINI_VOICE_NAME = 'Kore';
 const SUMMARY_FUNCTION_NAME = 'save_call_summary';
 
 const NEXT_CALL_DELAY_MS = 1000;
-const CALL_TIMEOUT_MS = 60 * 1000;
+const CALL_TIMEOUT_MS = 45 * 1000;
 const MAX_CALL_DURATION_MS = 5 * 60 * 1000;
 const SUMMARY_REQUEST_TIMEOUT_MS = 15000;
 const TASK_CONTEXT_FETCH_TIMEOUT_MS = 3500;
@@ -665,6 +665,30 @@ VoxEngine.addEventListener(AppEvents.Started, async () => {
             if (session.summaryReceived && normalizeText(session.summaryData.summary)) {
                 return session.summaryData;
             }
+
+            const noAnswerReasons = {
+                call_timeout: 'Абонент не ответил за 45 секунд.',
+                call_failed: 'Звонок не состоялся: абонент не ответил, сбросил звонок или линия была недоступна.',
+                dial_error: 'Ошибка при попытке набора номера.'
+            };
+            if (!session.callConnected) {
+                const outcomeText = noAnswerReasons[session.finalizationReason] || 'Звонок не был соединен с абонентом.';
+                return {
+                    client_name: safeString(leadContext && (leadContext.client_name || leadContext.name)),
+                    client_phone: session.targetPhone,
+                    call_goal: 'Исходящий дозвон по базе участников мебельного форума Amix.',
+                    manager_offer: 'Разговор не состоялся, вопросы клиенту не задавались.',
+                    activity_type: '',
+                    is_decision_maker: '',
+                    average_check: '',
+                    traffic_source: '',
+                    bot_impression: '',
+                    outcome: outcomeText,
+                    next_step: 'Если клиент перезвонит на номер, входящий сценарий должен подтянуть историю по номеру и продолжить опрос.',
+                    summary: `Не удалось дозвониться до участника Amix на номер ${session.targetPhone}. ${outcomeText}`
+                };
+            }
+
             const userText = clipText(
                 session.dialogue
                     .filter((item) => item.role === 'user')
@@ -822,7 +846,7 @@ VoxEngine.addEventListener(AppEvents.Started, async () => {
                 });
             };
 
-            if (!activeGeminiClient || session.summaryReceived || session.summaryRequestSent) {
+            if (!session.callConnected || !activeGeminiClient || session.summaryReceived || session.summaryRequestSent) {
                 finalizeNow();
                 return;
             }

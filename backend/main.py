@@ -649,6 +649,102 @@ def build_task_context(campaign: Campaign, contact: OutboundContact, task: Outbo
     }
 
 
+def call_context_brief(db_call: Call) -> dict[str, Any]:
+    return {
+        "id": db_call.id,
+        "session_id": db_call.voximplant_session_id,
+        "outbound_task_id": db_call.outbound_task_id,
+        "campaign_id": db_call.campaign_id,
+        "status": db_call.status,
+        "client_name": db_call.client_name or "",
+        "client_phone": db_call.client_phone or "",
+        "caller_phone": db_call.caller_phone or "",
+        "summary": db_call.summary or "",
+        "outcome": db_call.outcome or "",
+        "next_step": db_call.next_step or "",
+        "call_goal": db_call.call_goal or "",
+        "manager_offer": db_call.manager_offer or "",
+        "recording_status": db_call.recording_status or "",
+        "recording_url": db_call.recording_url or "",
+        "started_at": db_call.started_at.isoformat() if db_call.started_at else None,
+        "connected_at": db_call.connected_at.isoformat() if db_call.connected_at else None,
+        "finished_at": db_call.finished_at.isoformat() if db_call.finished_at else None,
+        "updated_at": db_call.updated_at.isoformat() if db_call.updated_at else None,
+    }
+
+
+def task_context_brief(task: OutboundTask, contact: Optional[OutboundContact] = None, campaign: Optional[Campaign] = None) -> dict[str, Any]:
+    return {
+        "id": task.id,
+        "campaign_id": task.campaign_id,
+        "campaign_name": campaign.name if campaign else "",
+        "contact_id": task.contact_id,
+        "phone": task.phone,
+        "name": contact.name if contact else "",
+        "company": contact.company if contact else "",
+        "status": task.status,
+        "last_status": task.last_status or "",
+        "last_status_message": task.last_status_message or "",
+        "result_status": task.result_status or "",
+        "result_summary": task.result_summary or "",
+        "last_error": task.last_error or "",
+        "attempt_count": task.attempt_count,
+        "max_attempts": task.max_attempts,
+        "voximplant_session_id": task.voximplant_session_id or "",
+        "scheduled_at": task.scheduled_at.isoformat() if task.scheduled_at else None,
+        "started_at": task.started_at.isoformat() if task.started_at else None,
+        "finished_at": task.finished_at.isoformat() if task.finished_at else None,
+        "updated_at": task.updated_at.isoformat() if task.updated_at else None,
+    }
+
+
+def build_inbound_context_text(
+    phone: str,
+    lead_context: dict[str, Any],
+    last_task: Optional[dict[str, Any]],
+    last_call: Optional[dict[str, Any]],
+) -> str:
+    lines = [f"Входящий звонок с номера {phone}."]
+    client_name = safe_text(lead_context.get("client_name")).strip()
+    if client_name:
+        lines.append(f"Имя клиента в базе: {client_name}.")
+    company = safe_text(lead_context.get("company")).strip()
+    if company:
+        lines.append(f"Компания/ниша: {company}.")
+    attendance_status = safe_text(lead_context.get("attendance_status")).strip()
+    if attendance_status:
+        lines.append(f"Статус участия в Amix: {attendance_label(attendance_status)}.")
+    activity_type = safe_text(lead_context.get("activity_type")).strip()
+    if activity_type:
+        lines.append(f"Вид деятельности: {activity_type}.")
+    campaign_context = safe_text(lead_context.get("campaign_context")).strip()
+    if campaign_context:
+        lines.append(f"Контекст кампании: {campaign_context}.")
+    context = safe_text(lead_context.get("context")).strip()
+    if context:
+        lines.append(f"Контекст строки базы: {context}.")
+
+    if last_task:
+        task_status = safe_text(last_task.get("status")).strip()
+        last_status = safe_text(last_task.get("last_status") or last_task.get("result_status")).strip()
+        if task_status or last_status:
+            lines.append(f"Последняя задача обзвона: статус {task_status or 'не указан'}, последний этап {last_status or 'не указан'}.")
+        result_summary = safe_text(last_task.get("result_summary")).strip()
+        if result_summary:
+            lines.append(f"Итог последней задачи: {result_summary}.")
+
+    if last_call:
+        call_status = safe_text(last_call.get("status")).strip()
+        outcome = safe_text(last_call.get("outcome")).strip()
+        summary = safe_text(last_call.get("summary")).strip()
+        if call_status or outcome:
+            lines.append(f"Последний звонок: статус {call_status or 'не указан'}, итог: {outcome or 'не указан'}.")
+        if summary:
+            lines.append(f"Summary последнего звонка: {summary}.")
+
+    return "\n".join(lines)
+
+
 def get_campaign_stats(db: Session, campaign_id: int) -> dict[str, int]:
     rows = db.query(OutboundTask.status, OutboundTask.id).filter(OutboundTask.campaign_id == campaign_id).all()
     stats: dict[str, int] = {}
@@ -1860,6 +1956,103 @@ def get_scenario_context(
         raise HTTPException(status_code=404, detail="context not found")
 
     return build_task_context(campaign, contact, task)
+
+
+@app.get("/inbound/caller-context")
+def get_inbound_caller_context(
+    request: Request,
+    phone: str = Query(..., min_length=3),
+    db: Session = Depends(get_db),
+):
+    require_webhook_secret(request)
+
+    normalized_phone = normalize_phone(phone)
+    if not normalized_phone:
+        raise HTTPException(status_code=400, detail="phone is empty")
+
+    latest_contact = (
+        db.query(OutboundContact)
+        .filter(OutboundContact.phone == normalized_phone)
+        .order_by(OutboundContact.updated_at.desc(), OutboundContact.id.desc())
+        .first()
+    )
+    recent_tasks = (
+        db.query(OutboundTask)
+        .filter(OutboundTask.phone == normalized_phone)
+        .order_by(OutboundTask.updated_at.desc(), OutboundTask.id.desc())
+        .limit(5)
+        .all()
+    )
+    recent_calls = (
+        db.query(Call)
+        .filter(or_(Call.client_phone == normalized_phone, Call.caller_phone == normalized_phone))
+        .order_by(Call.updated_at.desc(), Call.id.desc())
+        .limit(5)
+        .all()
+    )
+
+    latest_task = recent_tasks[0] if recent_tasks else None
+    context_contact = latest_contact
+    context_campaign = None
+    lead_context: dict[str, Any] = {}
+
+    if latest_task:
+        task_contact = db.query(OutboundContact).filter(OutboundContact.id == latest_task.contact_id).first()
+        task_campaign = db.query(Campaign).filter(Campaign.id == latest_task.campaign_id).first()
+        if task_contact and task_campaign:
+            context_contact = task_contact
+            context_campaign = task_campaign
+            lead_context = build_task_context(task_campaign, task_contact, latest_task)
+
+    if not lead_context and context_contact:
+        context_campaign = db.query(Campaign).filter(Campaign.id == context_contact.campaign_id).first()
+        raw_row = json_dict(context_contact.raw_row_json)
+        normalized = raw_row.get("normalized") if isinstance(raw_row.get("normalized"), dict) else {}
+        lead_context = {
+            "phone": context_contact.phone,
+            "client_name": context_contact.name or "",
+            "last_name": normalized.get("last_name", ""),
+            "email": normalized.get("email", ""),
+            "company": context_contact.company or "",
+            "city": context_contact.city or "",
+            "source": context_contact.source or "",
+            "attendance_status": normalized.get("attendance_status", ""),
+            "activity_type": normalized.get("activity_type", ""),
+            "is_decision_maker": normalized.get("is_decision_maker", ""),
+            "average_check": normalized.get("average_check", ""),
+            "traffic_source": normalized.get("traffic_source", ""),
+            "bot_impression": normalized.get("bot_impression", ""),
+            "task": context_contact.task or "",
+            "context": context_contact.context or "",
+            "preferred_time": context_contact.preferred_time or "",
+            "timezone": context_contact.timezone or "",
+            "campaign_context": context_campaign.prompt_context if context_campaign else "",
+        }
+
+    task_briefs: list[dict[str, Any]] = []
+    for task in recent_tasks:
+        contact = context_contact if context_contact and context_contact.id == task.contact_id else None
+        if not contact:
+            contact = db.query(OutboundContact).filter(OutboundContact.id == task.contact_id).first()
+        campaign = context_campaign if context_campaign and context_campaign.id == task.campaign_id else None
+        if not campaign:
+            campaign = db.query(Campaign).filter(Campaign.id == task.campaign_id).first()
+        task_briefs.append(task_context_brief(task, contact, campaign))
+
+    call_briefs = [call_context_brief(db_call) for db_call in recent_calls]
+    last_task = task_briefs[0] if task_briefs else None
+    last_call = call_briefs[0] if call_briefs else None
+
+    return {
+        "phone": normalized_phone,
+        "known": bool(lead_context or task_briefs or call_briefs),
+        "lead_context": lead_context,
+        "last_task": last_task,
+        "last_call": last_call,
+        "recent_tasks": task_briefs,
+        "recent_calls": call_briefs,
+        "context_text": build_inbound_context_text(normalized_phone, lead_context, last_task, last_call),
+    }
 
 
 @app.post("/webhook/voximplant/status")

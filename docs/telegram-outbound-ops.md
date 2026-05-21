@@ -23,6 +23,7 @@ Queue tuning:
 - `OUTBOUND_MAX_CONCURRENT_CALLS=1` - simultaneous calls limit.
 - `OUTBOUND_RETRY_DELAY_MINUTES=30` - retry delay setting for failed attempts.
 - `OUTBOUND_DEFAULT_CALL_DELAY_SECONDS=60` - default pause between contacts in a new campaign.
+- Voximplant outbound scenario no-answer timeout is currently `45` seconds (`CALL_TIMEOUT_MS` in `scenarios/outbound_gemini_server_edition.js`).
 
 ## Telegram commands
 
@@ -92,6 +93,29 @@ phone;name;company;source;task;context;preferred_time;campaign_context;call_afte
 8. Backend stores transcript, summary, costs, statuses and recording metadata in SQLite.
 9. Backend downloads the recording into `backend/recordings` and sends it to Telegram as an audio reply to the task status message.
 10. If `GOOGLE_APPS_SCRIPT_WEBHOOK_URL` is set, backend posts the final payload to Google Apps Script for table updates.
+
+If the contact does not answer within 45 seconds, the scenario hangs up, finalizes the task as `call_timeout`, and skips Gemini summary generation because there was no conversation.
+
+## Incoming callback draft
+
+`scenarios/inbound_gemini_callback_server_edition.js` is a prepared but not bound Voximplant scenario for incoming callbacks. It is intended for the later separate incoming rule.
+
+The draft scenario:
+
+- accepts an incoming call;
+- reads the caller phone from `call.callerid()` or `call.number()`;
+- requests `GET /inbound/caller-context?phone=...` from backend;
+- injects the latest campaign/contact/task/call context into Gemini;
+- continues the Amix questionnaire if the caller is known;
+- stores the incoming call through the same `/webhook/voximplant/finalize` flow.
+
+The backend endpoint returns:
+
+- `lead_context` - contact/campaign context;
+- `last_task` - latest outbound task for the phone;
+- `last_call` - latest saved call for the phone;
+- `recent_tasks` and `recent_calls`;
+- `context_text` - ready-to-inject Russian context for the prompt.
 
 ## Google Sheets update
 
