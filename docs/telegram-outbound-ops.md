@@ -31,6 +31,7 @@ Queue tuning:
 - `/campaigns` - recent campaigns with counts.
 - `/template` or `/upload` - send the empty Amix XLSX template and import instructions.
 - `/run ID` - activate a paused campaign.
+- `/rerun ID` - reset all tasks in a campaign back to pending and leave the campaign paused for a deliberate repeat run.
 - `/pause ID` or `/stop ID` - pause a campaign.
 - `/delay ID 30s` - set pause between contacts. Examples: `30s`, `45 сек`, `2m`, `2 мин`.
 - `/calls` - last saved calls.

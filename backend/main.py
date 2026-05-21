@@ -92,10 +92,11 @@ TELEGRAM_BOT_COMMANDS = [
     BotCommand(command="template", description="получить XLSX-шаблон базы"),
     BotCommand(command="campaigns", description="список кампаний"),
     BotCommand(command="run", description="запустить кампанию: /run ID"),
+    BotCommand(command="rerun", description="подготовить повторный запуск: /rerun ID"),
     BotCommand(command="pause", description="поставить кампанию на паузу: /pause ID"),
     BotCommand(command="stop", description="остановить кампанию: /stop ID"),
     BotCommand(command="delay", description="пауза между контактами: /delay ID 30s"),
-    BotCommand(command="status", description="статус backend и очереди"),
+    BotCommand(command="status", description="статус сервера и очереди"),
     BotCommand(command="calls", description="последние звонки"),
     BotCommand(command="setcommands", description="обновить меню команд"),
 ]
@@ -775,6 +776,74 @@ def format_delay(seconds: Any) -> str:
     return f"{value} сек"
 
 
+STATUS_RU = {
+    "active": "запущена",
+    "paused": "на паузе",
+    "pending": "ожидает",
+    "scheduled": "запланирована",
+    "starting": "запускается",
+    "started": "сценарий запущен",
+    "in_progress": "идет звонок",
+    "completed": "завершено",
+    "failed": "ошибка",
+    "finished": "завершено",
+    "finalized": "завершено",
+    "started_no_url": "запись началась, ссылка пока не получена",
+    "requested_not_confirmed": "запись запрошена",
+    "not_started": "не начато",
+    "ready": "готово",
+    "disabled": "выключено",
+    "error": "ошибка",
+    "call_timeout": "не взяли трубку",
+    "call_failed": "звонок не состоялся",
+    "call_disconnected": "звонок завершен",
+    "dial_error": "ошибка набора",
+    "empty_call_target": "не передан номер",
+    "no_gemini_key": "не задан ключ ИИ",
+    "gemini_create_error": "ошибка подключения ИИ",
+}
+
+
+def status_ru(value: Any) -> str:
+    raw = safe_text(value).strip()
+    if not raw:
+        return "не указано"
+    return STATUS_RU.get(raw, raw)
+
+
+def display_text(value: Any) -> str:
+    text = safe_text(value)
+    replacements = {
+        "backend": "сервер",
+        "Backend": "Сервер",
+        "custom_data": "данные запуска",
+        "script_custom_data": "данные запуска",
+        "summary": "итоги",
+        "Summary": "Итоги",
+        "AI": "ИИ",
+        "Worker": "обработчик",
+        "Rule ID": "ID правила",
+        "call_timeout": "не взяли трубку",
+        "call_failed": "звонок не состоялся",
+        "call_disconnected": "звонок завершен",
+        "dial_error": "ошибка набора",
+        "gemini_create_error": "ошибка подключения ИИ",
+        "no_gemini_key": "не задан ключ ИИ",
+        "empty_call_target": "не передан номер",
+    }
+    for source, target in replacements.items():
+        text = text.replace(source, target)
+    return text
+
+
+def html_text(value: Any) -> str:
+    return escape(display_text(value))
+
+
+def format_stat_line(label: str, value: Any) -> str:
+    return f"<b>{label}:</b> {html_text(value)}"
+
+
 def get_campaign_recipients(campaign: Optional[Campaign]) -> list[str]:
     created_by = [campaign.created_by_chat_id] if campaign and campaign.created_by_chat_id else []
     return dedupe(get_admin_chat_ids() + normalize_chat_ids(",".join(created_by)))
@@ -821,7 +890,7 @@ STATUS_LABELS = {
 
 def status_label(stage: str, fallback: Optional[str] = None) -> str:
     clean_stage = safe_text(stage).strip()
-    return fallback or STATUS_LABELS.get(clean_stage, clean_stage or "Статус звонка обновлен")
+    return display_text(fallback or STATUS_LABELS.get(clean_stage, clean_stage or "Статус звонка обновлен"))
 
 
 def task_status_text(
@@ -832,29 +901,31 @@ def task_status_text(
     call: Optional[Call] = None,
 ) -> str:
     lines = [
-        f"<b>{escape(status_text)}</b>",
-        f"Кампания: #{campaign.id} {escape(campaign.name)}",
-        f"Задача: #{task.id}",
-        f"Контакт: {escape(display_contact(contact, task))}",
-        f"Статус: {escape(task.status or 'unknown')}",
-        f"Попытка: {task.attempt_count or 0}/{task.max_attempts or 1}",
+        f"<b>{html_text(status_text)}</b>",
+        "",
+        format_stat_line("Кампания", f"#{campaign.id} {campaign.name}"),
+        format_stat_line("Задача", f"#{task.id}"),
+        format_stat_line("Контакт", display_contact(contact, task)),
+        format_stat_line("Статус", status_ru(task.status)),
+        format_stat_line("Попытка", f"{task.attempt_count or 0}/{task.max_attempts or 1}"),
     ]
     if task.voximplant_session_id:
-        lines.append(f"Vox session: <code>{escape(task.voximplant_session_id)}</code>")
+        lines.append(f"<b>Сессия Voximplant:</b> <code>{escape(task.voximplant_session_id)}</code>")
     if task.last_status:
-        lines.append(f"Этап: {escape(status_label(task.last_status))}")
+        lines.append(format_stat_line("Этап", status_label(task.last_status)))
     if task.last_status_message:
-        lines.append(f"Детали: {escape(task.last_status_message)}")
+        lines.append(format_stat_line("Детали", task.last_status_message))
     if call:
-        lines.append(f"Call ID: #{call.id}")
+        lines.append("")
+        lines.append(format_stat_line("ID звонка", f"#{call.id}"))
         if call.duration is not None:
-            lines.append(f"Длительность: {call.duration} сек")
+            lines.append(format_stat_line("Длительность", f"{call.duration} сек"))
         if call.outcome:
-            lines.append(f"Итог: {escape(call.outcome)}")
+            lines.append(format_stat_line("Итог", call.outcome))
         if call.summary:
-            lines.append(f"Кратко: {escape(call.summary)}")
+            lines.append(format_stat_line("Кратко", call.summary))
     if task.last_error:
-        lines.append(f"Ошибка: {escape(task.last_error)}")
+        lines.append(format_stat_line("Ошибка", status_ru(task.last_error)))
     return "\n".join(lines)
 
 
@@ -865,7 +936,7 @@ def render_admin_report(payload: FinalizePayload) -> str:
         f"<b>\u041d\u043e\u043c\u0435\u0440:</b> {display_or_default(payload.client_phone or payload.caller_phone or DEFAULT_UNKNOWN, DEFAULT_UNKNOWN)}",
         f"<b>\u0414\u043b\u0438\u0442\u0435\u043b\u044c\u043d\u043e\u0441\u0442\u044c:</b> {safe_text(payload.call_duration_sec or 0)} \u0441\u0435\u043a",
         f"<b>\u0422\u0435\u043b\u0435\u0444\u043e\u043d\u0438\u044f:</b> {safe_text(payload.voximplant_total_rub or payload.telephony_cost_rub or 0)} \u0440\u0443\u0431",
-        f"<b>AI:</b> {safe_text(payload.ai_cost_rub or 0)} \u0440\u0443\u0431 ({safe_text(payload.ai_cost_usd or 0)} USD)",
+        f"<b>ИИ:</b> {safe_text(payload.ai_cost_rub or 0)} \u0440\u0443\u0431 ({safe_text(payload.ai_cost_usd or 0)} USD)",
         f"<b>\u0418\u0442\u043e\u0433\u043e\u0432\u0430\u044f \u0441\u0442\u043e\u0438\u043c\u043e\u0441\u0442\u044c:</b> {safe_text(payload.total_cost_rub or payload.voximplant_total_rub or payload.telephony_cost_rub or 0)} \u0440\u0443\u0431",
     ]
 
@@ -1085,11 +1156,11 @@ async def send_outbound_recording(task_id: int, local_path: Optional[str]) -> tu
         call = None
         if task.voximplant_session_id:
             call = db.query(Call).filter(Call.voximplant_session_id == task.voximplant_session_id).first()
-        caption_lines = [f"Запись звонка по задаче #{task.id}"]
+        caption_lines = [f"<b>Запись звонка</b>", format_stat_line("Задача", f"#{task.id}")]
         if call:
-            caption_lines.append(f"Call ID: #{call.id}")
+            caption_lines.append(format_stat_line("ID звонка", f"#{call.id}"))
             if call.duration is not None:
-                caption_lines.append(f"Длительность: {call.duration} сек")
+                caption_lines.append(format_stat_line("Длительность", f"{call.duration} сек"))
         caption = "\n".join(caption_lines)
 
         refs = parse_task_message_refs(task)
@@ -1106,6 +1177,7 @@ async def send_outbound_recording(task_id: int, local_path: Optional[str]) -> tu
                     "chat_id": ref["chat_id"],
                     "audio": FSInputFile(str(file_path)),
                     "caption": caption,
+                    "parse_mode": ParseMode.HTML,
                 }
                 if ref.get("message_id"):
                     kwargs["reply_to_message_id"] = ref["message_id"]
@@ -1267,7 +1339,7 @@ async def persist_and_send_outbound_recording(task_id: int, session_id: str, url
         status,
         error_text,
     )
-    await notify_outbound_task(task_id, f"Запись не скачалась: {error_text or status}")
+    await notify_outbound_task(task_id, f"Запись не скачалась: {error_text or status_ru(status)}")
 
 
 async def cleanup_old_recordings():
@@ -1559,7 +1631,7 @@ async def create_campaign_from_rows(
 def admin_only(handler):
     async def wrapper(message: Message):
         if not is_admin_chat(message.chat.id):
-            await message.answer("Доступ закрыт.")
+            await message.answer("<b>Доступ закрыт.</b>")
             return
         await handler(message)
 
@@ -1569,15 +1641,17 @@ def admin_only(handler):
 async def tg_help(message: Message):
     text = (
         "<b>Управление обзвоном</b>\n\n"
-        "/help - эта справка\n"
-        "/upload или /template - получить шаблон таблицы\n"
-        "/campaigns - список кампаний\n"
-        "/run ID - запустить кампанию\n"
-        "/pause ID или /stop ID - остановить кампанию\n"
-        "/delay ID 30s - пауза между контактами\n"
-        "/status - состояние backend и очереди\n"
-        "/calls - последние звонки\n\n"
-        "Для загрузки базы отправьте файл XLSX, CSV или TSV. После загрузки кампания создаётся на паузе."
+        "<b>/help</b> — справка\n"
+        "<b>/upload</b> или <b>/template</b> — получить шаблон таблицы\n"
+        "<b>/campaigns</b> — список кампаний\n"
+        "<b>/run ID</b> — запустить кампанию\n"
+        "<b>/pause ID</b> или <b>/stop ID</b> — поставить кампанию на паузу\n"
+        "<b>/rerun ID</b> — подготовить повторный запуск кампании\n"
+        "<b>/delay ID 30s</b> — изменить паузу между контактами\n"
+        "<b>/status</b> — состояние сервера и очереди\n"
+        "<b>/calls</b> — последние звонки\n\n"
+        "Для загрузки базы отправьте файл <b>XLSX</b>, <b>CSV</b> или <b>TSV</b>. "
+        "После загрузки кампания создается на паузе."
     )
     await message.answer(text)
 
@@ -1597,9 +1671,9 @@ async def configure_telegram_commands() -> tuple[str, Optional[str]]:
 async def tg_setcommands(message: Message):
     status, error_text = await configure_telegram_commands()
     if status == "configured":
-        await message.answer("Меню команд Telegram обновлено.")
+        await message.answer("<b>Меню команд обновлено.</b>")
     else:
-        await message.answer(f"Не удалось обновить команды: {error_text or status}")
+        await message.answer(f"<b>Не удалось обновить команды.</b>\n{html_text(error_text or status)}")
 
 
 async def tg_status(message: Message):
@@ -1618,17 +1692,19 @@ async def tg_status(message: Message):
     await message.answer(
         "\n".join(
             [
-                "<b>Статус</b>",
-                f"Кампаний: {campaigns}",
-                f"Контактов: {contacts}",
-                f"Задач: {tasks_total}",
-                f"В очереди: {pending}",
-                f"В работе: {active}",
-                f"Завершено: {completed}",
-                f"Ошибок: {failed}",
-                f"Worker: {'включен' if OUTBOUND_WORKER_ENABLED else 'выключен'}",
-                f"Rule ID: {VOXIMPLANT_RULE_ID or 'не задан'}",
-                f"Пауза по умолчанию: {format_delay(OUTBOUND_DEFAULT_CALL_DELAY_SECONDS)}",
+                "<b>Статус системы</b>",
+                "",
+                format_stat_line("Кампаний", campaigns),
+                format_stat_line("Контактов", contacts),
+                format_stat_line("Задач всего", tasks_total),
+                format_stat_line("В очереди", pending),
+                format_stat_line("В работе", active),
+                format_stat_line("Завершено", completed),
+                format_stat_line("Ошибок", failed),
+                "",
+                format_stat_line("Обработчик очереди", "включен" if OUTBOUND_WORKER_ENABLED else "выключен"),
+                format_stat_line("ID правила Voximplant", VOXIMPLANT_RULE_ID or "не задан"),
+                format_stat_line("Пауза по умолчанию", format_delay(OUTBOUND_DEFAULT_CALL_DELAY_SECONDS)),
             ]
         )
     )
@@ -1639,21 +1715,31 @@ async def tg_campaigns(message: Message):
     try:
         campaigns = db.query(Campaign).order_by(Campaign.id.desc()).limit(10).all()
         if not campaigns:
-            await message.answer("Кампаний пока нет. Отправьте CSV/TSV/XLSX файл с колонкой phone.")
+            await message.answer(
+                "<b>Кампаний пока нет.</b>\n\n"
+                "Отправьте файл <b>XLSX</b>, <b>CSV</b> или <b>TSV</b> с колонкой телефона."
+            )
             return
         lines = ["<b>Кампании</b>"]
         for campaign in campaigns:
             stats = get_campaign_stats(db, campaign.id)
-            next_call = ""
-            if campaign.next_call_after and campaign.next_call_after > datetime.utcnow():
-                next_call = f", следующий старт после {campaign.next_call_after.strftime('%H:%M:%S')}"
+            lines.append("")
+            lines.append(f"<b>Кампания #{campaign.id}</b>")
+            lines.append(format_stat_line("Название", campaign.name))
+            lines.append(format_stat_line("Статус", status_ru(campaign.status)))
+            lines.append(format_stat_line("Контактов", stats.get("total", 0)))
+            lines.append(format_stat_line("Ожидают", stats.get("pending", 0) + stats.get("scheduled", 0)))
             lines.append(
-                f"#{campaign.id} {campaign.name} - {campaign.status}; "
-                f"total={stats.get('total', 0)}, pending={stats.get('pending', 0)}, "
-                f"active={stats.get('started', 0) + stats.get('starting', 0) + stats.get('in_progress', 0)}, "
-                f"done={stats.get('completed', 0)}, failed={stats.get('failed', 0)}, "
-                f"delay={format_delay(campaign.call_delay_seconds)}{next_call}"
+                format_stat_line(
+                    "В работе",
+                    stats.get("started", 0) + stats.get("starting", 0) + stats.get("in_progress", 0),
+                )
             )
+            lines.append(format_stat_line("Завершено", stats.get("completed", 0)))
+            lines.append(format_stat_line("Ошибок", stats.get("failed", 0)))
+            lines.append(format_stat_line("Пауза", format_delay(campaign.call_delay_seconds)))
+            if campaign.next_call_after and campaign.next_call_after > datetime.utcnow():
+                lines.append(format_stat_line("Следующий старт после", campaign.next_call_after.strftime("%H:%M:%S")))
     finally:
         db.close()
     await message.answer("\n".join(lines))
@@ -1662,14 +1748,14 @@ async def tg_campaigns(message: Message):
 async def tg_run_or_pause(message: Message, status: str):
     parts = safe_text(message.text).split()
     if len(parts) < 2 or not parts[1].isdigit():
-        await message.answer("Укажите ID кампании, например: /run 1")
+        await message.answer("<b>Укажите ID кампании.</b>\n\nПример: <code>/run 1</code>")
         return
     campaign_id = int(parts[1])
     db = SessionLocal()
     try:
         campaign = db.query(Campaign).filter(Campaign.id == campaign_id).first()
         if not campaign:
-            await message.answer(f"Кампания #{campaign_id} не найдена.")
+            await message.answer(f"<b>Кампания #{campaign_id} не найдена.</b>")
             return
         campaign.status = status
         campaign.updated_at = datetime.utcnow()
@@ -1684,20 +1770,24 @@ async def tg_run_or_pause(message: Message, status: str):
         db.close()
     action = "запущена" if status == "active" else "остановлена"
     await message.answer(
-        f"Кампания #{campaign_id} {action}. "
-        f"Задач: {stats.get('total', 0)}, в очереди: {stats.get('pending', 0)}."
+        "\n".join(
+            [
+                f"<b>Кампания #{campaign_id} {action}.</b>",
+                "",
+                format_stat_line("Задач всего", stats.get("total", 0)),
+                format_stat_line("Ожидают", stats.get("pending", 0) + stats.get("scheduled", 0)),
+                format_stat_line("В работе", stats.get("started", 0) + stats.get("starting", 0) + stats.get("in_progress", 0)),
+                format_stat_line("Завершено", stats.get("completed", 0)),
+                format_stat_line("Ошибок", stats.get("failed", 0)),
+            ]
+        )
     )
 
 
-async def tg_delay(message: Message):
-    parts = safe_text(message.text).split(maxsplit=2)
-    if len(parts) < 3 or not parts[1].isdigit():
-        await message.answer("Укажите ID кампании и паузу, например: /delay 1 30s или /delay 1 2m")
-        return
-
-    delay_seconds = parse_delay_seconds(parts[2])
-    if delay_seconds is None:
-        await message.answer("Не понял паузу. Примеры: 30s, 45 сек, 2m, 2 мин.")
+async def tg_rerun(message: Message):
+    parts = safe_text(message.text).split()
+    if len(parts) < 2 or not parts[1].isdigit():
+        await message.answer("<b>Укажите ID кампании.</b>\n\nПример: <code>/rerun 1</code>")
         return
 
     campaign_id = int(parts[1])
@@ -1705,7 +1795,73 @@ async def tg_delay(message: Message):
     try:
         campaign = db.query(Campaign).filter(Campaign.id == campaign_id).first()
         if not campaign:
-            await message.answer(f"Кампания #{campaign_id} не найдена.")
+            await message.answer(f"<b>Кампания #{campaign_id} не найдена.</b>")
+            return
+
+        now = datetime.utcnow()
+        tasks = db.query(OutboundTask).filter(OutboundTask.campaign_id == campaign_id).all()
+        for task in tasks:
+            task.status = "pending"
+            task.scheduled_at = now
+            task.started_at = None
+            task.finished_at = None
+            task.last_attempt_at = None
+            task.next_attempt_at = None
+            task.attempt_count = 0
+            task.voximplant_session_id = None
+            task.telegram_chat_id = None
+            task.telegram_message_id = None
+            task.telegram_message_refs_json = None
+            task.start_result_json = None
+            task.last_status = None
+            task.last_status_message = None
+            task.last_status_at = None
+            task.last_status_payload_json = None
+            task.result_status = None
+            task.result_summary = None
+            task.last_error = None
+            task.updated_at = now
+
+        campaign.status = "paused"
+        campaign.next_call_after = None
+        campaign.paused_at = now
+        campaign.updated_at = now
+        db.commit()
+        stats = get_campaign_stats(db, campaign.id)
+    finally:
+        db.close()
+
+    await message.answer(
+        "\n".join(
+            [
+                f"<b>Кампания #{campaign_id} подготовлена к повторному запуску.</b>",
+                "",
+                format_stat_line("Статус", "на паузе"),
+                format_stat_line("Задач сброшено", stats.get("pending", 0) + stats.get("scheduled", 0)),
+                "",
+                f"Запуск: <code>/run {campaign_id}</code>",
+            ]
+        )
+    )
+
+
+async def tg_delay(message: Message):
+    parts = safe_text(message.text).split(maxsplit=2)
+    if len(parts) < 3 or not parts[1].isdigit():
+        await message.answer("<b>Укажите ID кампании и паузу.</b>\n\nПримеры: <code>/delay 1 30s</code> или <code>/delay 1 2m</code>")
+        return
+
+    delay_seconds = parse_delay_seconds(parts[2])
+    if delay_seconds is None:
+        await message.answer("<b>Не понял паузу.</b>\n\nПримеры: <code>30s</code>, <code>45 сек</code>, <code>2m</code>, <code>2 мин</code>.")
+        return
+
+    campaign_id = int(parts[1])
+    db = SessionLocal()
+    try:
+        campaign = db.query(Campaign).filter(Campaign.id == campaign_id).first()
+        if not campaign:
+            await message.answer(f"<b>Кампания #{campaign_id} не найдена.</b>")
             return
         campaign.call_delay_seconds = delay_seconds
         campaign.updated_at = datetime.utcnow()
@@ -1713,21 +1869,30 @@ async def tg_delay(message: Message):
     finally:
         db.close()
 
-    await message.answer(f"Кампания #{campaign_id}: пауза между контактами {format_delay(delay_seconds)}.")
+    await message.answer(
+        "\n".join(
+            [
+                f"<b>Пауза обновлена.</b>",
+                "",
+                format_stat_line("Кампания", f"#{campaign_id}"),
+                format_stat_line("Пауза между контактами", format_delay(delay_seconds)),
+            ]
+        )
+    )
 
 
 async def tg_template(message: Message):
     template_path = ensure_forum_amix_template()
     caption = (
         "<b>Шаблон базы обзвона</b>\n\n"
-        "Поддерживаемые форматы: XLSX, CSV, TSV.\n"
-        "Для Amix используем этот шаблон: до G - данные от организатора, после G - поля менеджера и результат прозвона.\n\n"
-        "Ключевые колонки:\n"
-        "E: Контактныйтелефон\n"
-        "G: Пришёл - важно, по нему выбирается начало скрипта\n"
-        "B/C/F: имя, фамилия, компания\n"
-        "I-P: поля, которые бот может учитывать и потом заполнять через Google Sheets webhook.\n\n"
-        "Отправьте заполненный файл сюда. Кампания создастся на паузе, запуск: /run ID."
+        "<b>Форматы:</b> XLSX, CSV, TSV.\n"
+        "Для Amix используем этот шаблон: до столбца G — данные от организатора, после G — поля менеджера и результат прозвона.\n\n"
+        "<b>Ключевые колонки:</b>\n"
+        "<b>E:</b> Контактныйтелефон\n"
+        "<b>G:</b> Пришёл — по нему выбирается начало скрипта\n"
+        "<b>B/C/F:</b> имя, фамилия, компания\n"
+        "<b>I-P:</b> поля, которые бот может учитывать и потом заполнять через Google Sheets.\n\n"
+        "Отправьте заполненный файл сюда. Кампания создастся на паузе."
     )
     await message.answer_document(FSInputFile(str(template_path)), caption=caption)
 
@@ -1737,14 +1902,21 @@ async def tg_calls(message: Message):
     try:
         calls = db.query(Call).order_by(Call.id.desc()).limit(5).all()
         if not calls:
-            await message.answer("Звонков пока нет.")
+            await message.answer("<b>Звонков пока нет.</b>")
             return
         lines = ["<b>Последние звонки</b>"]
         for call in calls:
-            lines.append(
-                f"#{call.id} {call.client_phone or call.caller_phone or '?'} - {call.status}; "
-                f"{display_or_default(call.summary, 'без summary')}"
-            )
+            lines.append("")
+            lines.append(f"<b>Звонок #{call.id}</b>")
+            lines.append(format_stat_line("Номер", call.client_phone or call.caller_phone or "не указан"))
+            lines.append(format_stat_line("Статус", status_ru(call.status)))
+            if call.client_name:
+                lines.append(format_stat_line("Имя", call.client_name))
+            if call.duration is not None:
+                lines.append(format_stat_line("Длительность", f"{call.duration} сек"))
+            if call.outcome:
+                lines.append(format_stat_line("Итог", call.outcome))
+            lines.append(format_stat_line("Кратко", call.summary or "итоги пока не сохранены"))
     finally:
         db.close()
     await message.answer("\n".join(lines))
@@ -1756,7 +1928,7 @@ async def tg_document(message: Message):
         return
     suffix = Path(document.file_name or "").suffix.lower()
     if suffix not in {".csv", ".tsv", ".xlsx"}:
-        await message.answer("Поддерживаются файлы CSV, TSV и XLSX.")
+        await message.answer("<b>Формат не поддерживается.</b>\n\nМожно загрузить файл <b>XLSX</b>, <b>CSV</b> или <b>TSV</b>.")
         return
 
     file = await bot.get_file(document.file_id)  # type: ignore[union-attr]
@@ -1772,11 +1944,11 @@ async def tg_document(message: Message):
         rows, campaign_context = normalize_import_rows(raw_rows)
     except Exception as exc:  # noqa: BLE001
         logger.exception("Failed to parse uploaded file")
-        await message.answer(f"Не удалось разобрать файл: {exc}")
+        await message.answer(f"<b>Не удалось разобрать файл.</b>\n\n{html_text(exc)}")
         return
 
     if not rows:
-        await message.answer("В файле не нашел строк с телефоном. Проверьте колонку phone/телефон.")
+        await message.answer("<b>В файле не нашел контактов.</b>\n\nПроверьте колонку <b>phone</b> или <b>телефон</b>.")
         return
 
     db = SessionLocal()
@@ -1793,12 +1965,19 @@ async def tg_document(message: Message):
         db.close()
 
     await message.answer(
-        f"База загружена: кампания #{campaign.id}\n"
-        f"Контактов: {stats.get('total', 0)}\n"
-        f"Статус: paused\n"
-        f"Пауза между контактами: {format_delay(campaign.call_delay_seconds)}\n\n"
-        f"Запуск: /run {campaign.id}\n"
-        f"Изменить паузу: /delay {campaign.id} 30s"
+        "\n".join(
+            [
+                f"<b>База загружена.</b>",
+                "",
+                format_stat_line("Кампания", f"#{campaign.id}"),
+                format_stat_line("Контактов", stats.get("total", 0)),
+                format_stat_line("Статус", status_ru(campaign.status)),
+                format_stat_line("Пауза между контактами", format_delay(campaign.call_delay_seconds)),
+                "",
+                f"Запуск: <code>/run {campaign.id}</code>",
+                f"Изменить паузу: <code>/delay {campaign.id} 30s</code>",
+            ]
+        )
     )
 
 
@@ -1811,6 +1990,7 @@ def setup_telegram_dispatcher():
     dispatcher.message.register(admin_only(tg_status), Command("status"))
     dispatcher.message.register(admin_only(tg_campaigns), Command("campaigns"))
     dispatcher.message.register(admin_only(lambda message: tg_run_or_pause(message, "active")), Command("run"))
+    dispatcher.message.register(admin_only(tg_rerun), Command("rerun"))
     dispatcher.message.register(admin_only(lambda message: tg_run_or_pause(message, "paused")), Command("pause"))
     dispatcher.message.register(admin_only(lambda message: tg_run_or_pause(message, "paused")), Command("stop"))
     dispatcher.message.register(admin_only(tg_delay), Command("delay", "interval"))
