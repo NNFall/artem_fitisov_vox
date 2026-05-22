@@ -394,6 +394,9 @@ AMIX_TEMPLATE_HEADERS = [
     "Для бота: Саммари разговора",
 ]
 
+AMIX_POSITIONAL_PHONE_INDEX = 4
+XLSX_HEADER_SCAN_ROWS = 10
+
 
 def ensure_forum_amix_template() -> Path:
     if FORUM_AMIX_TEMPLATE_PATH.exists():
@@ -522,9 +525,34 @@ def read_xlsx_rows(content: bytes) -> list[dict[str, Any]]:
     rows = list(sheet.iter_rows(values_only=True))
     if not rows:
         return []
-    headers = [safe_text(cell).strip() for cell in rows[0]]
+
+    first_data_row_index = 0
+    headers: list[str] = []
+    for index, row in enumerate(rows[:XLSX_HEADER_SCAN_ROWS]):
+        candidate_headers = [safe_text(cell).strip() for cell in row]
+        canonical_headers = {canonical_column(header) for header in candidate_headers if safe_text(header).strip()}
+        if "phone" in canonical_headers:
+            headers = candidate_headers
+            first_data_row_index = index + 1
+            break
+
+    if not headers:
+        first_non_empty_index = next(
+            (index for index, row in enumerate(rows) if any(safe_text(value).strip() for value in row)),
+            None,
+        )
+        if first_non_empty_index is None:
+            return []
+        first_row = rows[first_non_empty_index]
+        if len(first_row) > AMIX_POSITIONAL_PHONE_INDEX and normalize_phone(first_row[AMIX_POSITIONAL_PHONE_INDEX]):
+            headers = AMIX_TEMPLATE_HEADERS
+            first_data_row_index = first_non_empty_index
+        else:
+            headers = [safe_text(cell).strip() for cell in rows[0]]
+            first_data_row_index = 1
+
     result: list[dict[str, Any]] = []
-    for row in rows[1:]:
+    for row in rows[first_data_row_index:]:
         item = {headers[i]: row[i] if i < len(row) else "" for i in range(len(headers)) if headers[i]}
         if any(safe_text(v).strip() for v in item.values()):
             result.append(item)
@@ -1948,7 +1976,11 @@ async def tg_document(message: Message):
         return
 
     if not rows:
-        await message.answer("<b>В файле не нашел контактов.</b>\n\nПроверьте колонку <b>phone</b> или <b>телефон</b>.")
+        await message.answer(
+            "<b>В файле не нашел контактов.</b>\n\n"
+            "Проверьте колонку <b>phone</b>/<b>телефон</b> или колонку <b>E</b> "
+            "в шаблоне Amix, если файл загружен без строки заголовков."
+        )
         return
 
     db = SessionLocal()
