@@ -1,0 +1,17 @@
+services:
+  artem-fitisov-web-backend:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: artem-fitisov-web-backend
+    working_dir: /app/backend
+    command: uvicorn main:app --host 0.0.0.0 --port 8000
+    env_file:
+      - ./backend/.env
+    environment:
+      PUBLIC_BACKEND_URL: http://186.246.18.100:8002
+    volumes:
+      - ./backend:/app/backend
+    ports:
+      - "8002:8000"
+    restart: unless-stopped
