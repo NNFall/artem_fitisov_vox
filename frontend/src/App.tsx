@@ -1,4 +1,4 @@
-import { FormEvent, useEffect, useMemo, useState } from "react";
+import { FormEvent, useEffect, useMemo, useRef, useState } from "react";
 import { API_BASE, api } from "./api";
 import type { Call, Campaign, CampaignDetail, Contact, Dashboard, ImportResult } from "./types";
 
@@ -23,7 +23,9 @@ type GlyphName =
   | "redo"
   | "clock"
   | "save"
-  | "close";
+  | "close"
+  | "wave"
+  | "arrow";
 
 const statusLabels: Record<string, string> = {
   active: "запущена",
@@ -48,6 +50,10 @@ const statusLabels: Record<string, string> = {
   download_error: "запись не скачалась",
   started_no_url: "запись началась",
   requested_not_confirmed: "запись запрошена",
+  max_call_duration: "лимит времени",
+  websocket_close: "соединение закрыто",
+  client_hangup: "клиент завершил",
+  hangup: "звонок завершён",
 };
 
 const navItems: Array<{ tab: Tab; label: string; icon: GlyphName }> = [
@@ -96,6 +102,22 @@ function formatDuration(seconds?: number | null) {
 function compactText(value?: string | null, fallback = "нет данных") {
   const text = String(value || "").trim();
   return text || fallback;
+}
+
+function callName(call: Call) {
+  return compactText(call.client_name, "Без имени");
+}
+
+function callPhone(call: Call) {
+  return compactText(call.client_phone || call.caller_phone, "телефон не указан");
+}
+
+function callShortResult(call: Call) {
+  return compactText(call.summary || call.outcome || call.next_step, "результат пока не заполнен");
+}
+
+function recordingSource(call: Call) {
+  return call.recording_download_url ? `${API_BASE}${call.recording_download_url}` : "";
 }
 
 function Glyph({ name, size = 18, className = "" }: { name: GlyphName; size?: number; className?: string }) {
@@ -290,6 +312,22 @@ function Glyph({ name, size = 18, className = "" }: { name: GlyphName; size?: nu
     );
   }
 
+  if (name === "wave") {
+    return (
+      <svg {...common}>
+        <path d="M4.5 13.5v-3M8.2 16.5v-9M11.9 18.2V5.8M15.6 15.8V8.2M19.3 13.7v-3.4" {...stroke} />
+      </svg>
+    );
+  }
+
+  if (name === "arrow") {
+    return (
+      <svg {...common}>
+        <path d="M5 12h13M13.8 7.2 18.5 12l-4.7 4.8" {...stroke} />
+      </svg>
+    );
+  }
+
   return (
     <svg {...common}>
       <path d="M5 6.5h14v11H5z" {...stroke} />
@@ -384,40 +422,73 @@ function LoginView({ onLogin }: { onLogin: () => void }) {
 
   return (
     <main className="login-screen">
-      <form className="login-panel" onSubmit={submit}>
-        <div className="login-badge">
-          <Glyph name="brand" size={22} />
-        </div>
-        <h1>Панель обзвона</h1>
-        <p>Вход для управления кампаниями, базами и историей звонков.</p>
-
-        <label className="field">
-          <span>Логин</span>
-          <input value={username} onChange={(event) => setUsername(event.target.value)} autoComplete="username" />
-        </label>
-
-        <label className="field">
-          <span>Пароль</span>
-          <input
-            type="password"
-            value={password}
-            onChange={(event) => setPassword(event.target.value)}
-            autoComplete="current-password"
-          />
-        </label>
-
-        {error ? (
-          <div className="inline-error">
-            <Glyph name="alert" size={16} />
-            <span>{error}</span>
+      <section className="login-stage">
+        <div className="login-story">
+          <div className="login-brand">
+            <div className="login-badge">
+              <Glyph name="brand" size={24} />
+            </div>
+            <span>Обзвон AI</span>
           </div>
-        ) : null}
+          <div>
+            <p className="login-kicker">Личный контур Amix</p>
+            <h1>Панель, где звонок сразу превращается в результат</h1>
+            <p>
+              Кампании, контакты, записи разговоров и краткие итоги собраны в одном рабочем экране.
+            </p>
+          </div>
+          <div className="login-signal" aria-hidden="true">
+            {Array.from({ length: 34 }).map((_, index) => (
+              <span
+                key={index}
+                style={{
+                  ["--bar" as string]: `${22 + ((index * 19) % 62)}%`,
+                  ["--i" as string]: index,
+                }}
+              />
+            ))}
+          </div>
+          <div className="login-proof">
+            <span>сервер 8002</span>
+            <span>записи</span>
+            <span>статусы</span>
+          </div>
+        </div>
 
-        <button type="submit" className="primary-button wide" disabled={loading}>
-          {loading ? <Glyph name="refresh" size={17} className="spin" /> : <Glyph name="done" size={17} />}
-          <span>{loading ? "Проверяю" : "Войти"}</span>
-        </button>
-      </form>
+        <form className="login-panel" onSubmit={submit}>
+          <div>
+            <p className="form-kicker">Доступ администратора</p>
+            <h2>Войти в панель</h2>
+          </div>
+
+          <label className="field">
+            <span>Логин</span>
+            <input value={username} onChange={(event) => setUsername(event.target.value)} autoComplete="username" />
+          </label>
+
+          <label className="field">
+            <span>Пароль</span>
+            <input
+              type="password"
+              value={password}
+              onChange={(event) => setPassword(event.target.value)}
+              autoComplete="current-password"
+            />
+          </label>
+
+          {error ? (
+            <div className="inline-error">
+              <Glyph name="alert" size={16} />
+              <span>{error}</span>
+            </div>
+          ) : null}
+
+          <button type="submit" className="primary-button wide login-submit" disabled={loading}>
+            {loading ? <Glyph name="refresh" size={17} className="spin" /> : <Glyph name="arrow" size={17} />}
+            <span>{loading ? "Проверяю" : "Открыть панель"}</span>
+          </button>
+        </form>
+      </section>
     </main>
   );
 }
@@ -440,9 +511,11 @@ function Metric({ label, value, icon, tone = "neutral", detail }: { label: strin
 function DashboardView({
   dashboard,
   onOpenCampaign,
+  onOpenCall,
 }: {
   dashboard: Dashboard | null;
   onOpenCampaign: (id: number) => void;
+  onOpenCall: (call: Call) => void;
 }) {
   if (!dashboard) return <Skeleton title="Загружаю обзор" />;
   const failedCalls = dashboard.calls.recent.filter((call) => statusTone(call.status) === "bad").slice(0, 3);
@@ -517,13 +590,13 @@ function DashboardView({
           </div>
           <div className="list-table">
             {dashboard.calls.recent.map((call) => (
-              <div className="list-row static" key={call.id}>
+              <button type="button" className="list-row call-row" key={call.id} onClick={() => onOpenCall(call)}>
                 <span>
-                  <strong>{compactText(call.client_name, "Без имени")}</strong>
-                  <small>{compactText(call.client_phone || call.caller_phone)} · {formatDuration(call.duration)} · {formatDate(call.updated_at)}</small>
+                  <strong>{callName(call)}</strong>
+                  <small>{callPhone(call)} · {formatDuration(call.duration)} · {formatDate(call.updated_at)}</small>
                 </span>
                 <span className={`status-pill ${statusTone(call.status)}`}>{statusRu(call.status)}</span>
-              </div>
+              </button>
             ))}
             {!dashboard.calls.recent.length ? <EmptyText text="Звонков пока нет" /> : null}
           </div>
@@ -582,12 +655,14 @@ function CampaignsView({
   campaigns,
   selected,
   onSelect,
+  onOpenCall,
   onUploaded,
   onAction,
 }: {
   campaigns: Campaign[];
   selected: CampaignDetail | null;
   onSelect: (id: number) => void;
+  onOpenCall: (call: Call) => void;
   onUploaded: (result: ImportResult) => void;
   onAction: () => void;
 }) {
@@ -597,6 +672,12 @@ function CampaignsView({
     if (!needle) return campaigns;
     return campaigns.filter((campaign) => `${campaign.id} ${campaign.name}`.toLowerCase().includes(needle));
   }, [campaigns, query]);
+
+  useEffect(() => {
+    if (!selected && filtered[0]) {
+      onSelect(filtered[0].id);
+    }
+  }, [filtered, selected]);
 
   return (
     <div className="campaign-layout">
@@ -626,7 +707,7 @@ function CampaignsView({
       </section>
 
       {selected ? (
-        <CampaignDetailView detail={selected} onAction={onAction} />
+        <CampaignDetailView detail={selected} onAction={onAction} onOpenCall={onOpenCall} />
       ) : (
         <section className="panel empty-detail">
           <Glyph name="campaigns" size={30} />
@@ -638,7 +719,15 @@ function CampaignsView({
   );
 }
 
-function CampaignDetailView({ detail, onAction }: { detail: CampaignDetail; onAction: () => void }) {
+function CampaignDetailView({
+  detail,
+  onAction,
+  onOpenCall,
+}: {
+  detail: CampaignDetail;
+  onAction: () => void;
+  onOpenCall: (call: Call) => void;
+}) {
   const [delay, setDelay] = useState(String(detail.campaign.call_delay_seconds || 0));
   const [savingAction, setSavingAction] = useState("");
   const [error, setError] = useState("");
@@ -722,7 +811,7 @@ function CampaignDetailView({ detail, onAction }: { detail: CampaignDetail; onAc
           <h2>Звонки кампании</h2>
           <span>{detail.calls.length}</span>
         </div>
-        <CallsTable calls={detail.calls} compact />
+        <CallsTable calls={detail.calls} compact onSelect={onOpenCall} />
       </section>
     </section>
   );
@@ -818,24 +907,51 @@ function EditableContactRow({ contact, onSaved }: { contact: Contact; onSaved: (
   );
 }
 
-function CallsView({ calls }: { calls: Call[] }) {
+function CallsView({
+  calls,
+  selectedCallId,
+  onSelectCall,
+}: {
+  calls: Call[];
+  selectedCallId: number | null;
+  onSelectCall: (call: Call) => void;
+}) {
+  const selectedCall =
+    calls.find((call) => call.id === selectedCallId) ||
+    calls.find((call) => Boolean(call.recording_download_url)) ||
+    calls[0] ||
+    null;
+
   return (
-    <div className="view-stack">
+    <div className="calls-workspace">
       <div className="page-heading">
         <div>
-          <p>История</p>
+          <p>Разбор разговоров</p>
           <h1>Звонки</h1>
         </div>
         <span className="status-pill muted">{calls.length} записей</span>
       </div>
-      <section className="panel">
-        <CallsTable calls={calls} />
+
+      <section className="calls-lane">
+        <CallsTable calls={calls} compact selectedCallId={selectedCall?.id || null} onSelect={onSelectCall} />
       </section>
+
+      <CallResultPanel call={selectedCall} />
     </div>
   );
 }
 
-function CallsTable({ calls, compact = false }: { calls: Call[]; compact?: boolean }) {
+function CallsTable({
+  calls,
+  compact = false,
+  selectedCallId,
+  onSelect,
+}: {
+  calls: Call[];
+  compact?: boolean;
+  selectedCallId?: number | null;
+  onSelect?: (call: Call) => void;
+}) {
   return (
     <div className={`data-table calls-table ${compact ? "compact" : ""}`}>
       <div className="table-head">
@@ -845,27 +961,174 @@ function CallsTable({ calls, compact = false }: { calls: Call[]; compact?: boole
         <span>Запись</span>
       </div>
       {calls.map((call) => (
-        <div className="table-row" key={call.id}>
+        <button
+          type="button"
+          className={`table-row call-table-row ${selectedCallId === call.id ? "selected" : ""}`}
+          key={call.id}
+          onClick={() => onSelect?.(call)}
+        >
           <span>
-            <strong>{compactText(call.client_name, "Без имени")}</strong>
-            <small>{compactText(call.client_phone || call.caller_phone)} · {formatDate(call.updated_at)}</small>
+            <strong>{callName(call)}</strong>
+            <small>{callPhone(call)} · {formatDate(call.updated_at)}</small>
           </span>
           <span>
             <span className={`status-pill ${statusTone(call.status)}`}>{statusRu(call.status)}</span>
-            <small className="summary-line" title={call.summary || ""}>{compactText(call.summary || call.outcome, "итог не указан")}</small>
+            <small className="summary-line" title={call.summary || ""}>{callShortResult(call)}</small>
           </span>
           <span>{formatDuration(call.duration)}</span>
           <span>
             {call.recording_download_url ? (
-              <audio controls preload="none" src={`${API_BASE}${call.recording_download_url}`} />
+              <span className="recording-mini">
+                <Glyph name="wave" size={16} />
+                <span>есть запись</span>
+              </span>
             ) : (
               <span className="muted-text">нет файла</span>
             )}
           </span>
-        </div>
+        </button>
       ))}
       {!calls.length ? <EmptyText text="Звонков пока нет" /> : null}
     </div>
+  );
+}
+
+function AudioPlayer({ src }: { src: string }) {
+  const audioRef = useRef<HTMLAudioElement | null>(null);
+  const [playing, setPlaying] = useState(false);
+  const [current, setCurrent] = useState(0);
+  const [duration, setDuration] = useState(0);
+
+  async function toggle() {
+    const audio = audioRef.current;
+    if (!audio) return;
+    if (audio.paused) {
+      await audio.play();
+      setPlaying(true);
+    } else {
+      audio.pause();
+      setPlaying(false);
+    }
+  }
+
+  function seek(value: string) {
+    const audio = audioRef.current;
+    if (!audio) return;
+    const next = Number(value);
+    audio.currentTime = next;
+    setCurrent(next);
+  }
+
+  return (
+    <div className="voice-player">
+      <audio
+        ref={audioRef}
+        preload="metadata"
+        src={src}
+        onLoadedMetadata={(event) => setDuration(event.currentTarget.duration || 0)}
+        onTimeUpdate={(event) => setCurrent(event.currentTarget.currentTime || 0)}
+        onPause={() => setPlaying(false)}
+        onEnded={() => setPlaying(false)}
+      />
+      <button type="button" className="player-button" onClick={toggle} aria-label={playing ? "Пауза" : "Воспроизвести"}>
+        <Glyph name={playing ? "pause" : "play"} size={18} />
+      </button>
+      <div className="player-main">
+        <div className="wave-strip" aria-hidden="true">
+          {Array.from({ length: 26 }).map((_, index) => (
+            <span
+              key={index}
+              style={{
+                ["--bar" as string]: `${18 + ((index * 17) % 46)}%`,
+                ["--i" as string]: index,
+              }}
+            />
+          ))}
+        </div>
+        <input
+          type="range"
+          min="0"
+          max={Math.max(duration, 1)}
+          step="0.1"
+          value={Math.min(current, duration || 0)}
+          onChange={(event) => seek(event.target.value)}
+          aria-label="Позиция записи"
+        />
+      </div>
+      <span className="player-time">{formatDuration(Math.round(current))} / {formatDuration(Math.round(duration || 0))}</span>
+    </div>
+  );
+}
+
+function ResultLine({ label, value }: { label: string; value?: string | null }) {
+  return (
+    <div className="result-line">
+      <span>{label}</span>
+      <strong>{compactText(value, "не указано")}</strong>
+    </div>
+  );
+}
+
+function CallResultPanel({ call }: { call: Call | null }) {
+  if (!call) {
+    return (
+      <aside className="call-inspector empty-inspector">
+        <Glyph name="calls" size={34} />
+        <h2>Выберите звонок</h2>
+        <p>Нажмите на строку в списке, чтобы увидеть итог, следующий шаг, запись и текст диалога.</p>
+      </aside>
+    );
+  }
+
+  const src = recordingSource(call);
+
+  return (
+    <aside className="call-inspector">
+      <div className="inspector-head">
+        <div>
+          <p>Звонок #{call.session_id || call.id}</p>
+          <h2>{callName(call)}</h2>
+          <span>{callPhone(call)} · {formatDate(call.updated_at)}</span>
+        </div>
+        <span className={`status-pill ${statusTone(call.status)}`}>{statusRu(call.status)}</span>
+      </div>
+
+      <div className="result-hero">
+        <span>Итог разговора</span>
+        <strong>{callShortResult(call)}</strong>
+      </div>
+
+      <div className="result-grid">
+        <ResultLine label="Длительность" value={formatDuration(call.duration)} />
+        <ResultLine label="Следующий шаг" value={call.next_step} />
+        <ResultLine label="Статус записи" value={statusRu(call.recording_status)} />
+        <ResultLine label="Кампания" value={call.campaign_id ? `#${call.campaign_id}` : ""} />
+      </div>
+
+      <section className="inspector-section">
+        <div className="section-kicker">
+          <Glyph name="wave" size={16} />
+          <span>Запись разговора</span>
+        </div>
+        {src ? <AudioPlayer src={src} /> : <div className="recording-empty">Запись ещё не скачана или недоступна.</div>}
+      </section>
+
+      <section className="inspector-section">
+        <div className="section-kicker">
+          <Glyph name="done" size={16} />
+          <span>Сводка</span>
+        </div>
+        <p className="detail-copy">{compactText(call.summary || call.outcome, "Сводка по звонку пока не пришла.")}</p>
+      </section>
+
+      <section className="inspector-section">
+        <div className="section-kicker">
+          <Glyph name="campaigns" size={16} />
+          <span>Диалог</span>
+        </div>
+        <pre className="dialogue-box">{compactText(call.dialogue_text, "Текст диалога пока не сохранён.")}</pre>
+      </section>
+    </aside>
   );
 }
 
@@ -890,6 +1153,7 @@ export function App() {
   const [campaigns, setCampaigns] = useState<Campaign[]>([]);
   const [selectedCampaignId, setSelectedCampaignId] = useState<number | null>(null);
   const [selectedCampaign, setSelectedCampaign] = useState<CampaignDetail | null>(null);
+  const [selectedCallId, setSelectedCallId] = useState<number | null>(null);
   const [calls, setCalls] = useState<Call[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
@@ -909,6 +1173,9 @@ export function App() {
       setCalls(callsData);
       const nextCampaignId = targetCampaignId || campaignData[0]?.id || null;
       setSelectedCampaignId(nextCampaignId);
+      if (!selectedCallId && callsData[0]) {
+        setSelectedCallId((callsData.find((call) => Boolean(call.recording_download_url)) || callsData[0]).id);
+      }
       if (nextCampaignId) {
         setSelectedCampaign(await api.campaign(nextCampaignId));
       } else {
@@ -948,6 +1215,11 @@ export function App() {
     }
   }
 
+  function selectCall(call: Call) {
+    setSelectedCallId(call.id);
+    setActiveTab("calls");
+  }
+
   async function logout() {
     await api.logout().catch(() => undefined);
     setAuthenticated(false);
@@ -979,7 +1251,7 @@ export function App() {
         ) : null}
 
         {activeTab === "dashboard" ? (
-          <DashboardView dashboard={dashboard} onOpenCampaign={selectCampaign} />
+          <DashboardView dashboard={dashboard} onOpenCampaign={selectCampaign} onOpenCall={selectCall} />
         ) : null}
 
         {activeTab === "campaigns" ? (
@@ -987,6 +1259,7 @@ export function App() {
             campaigns={campaigns}
             selected={selectedCampaign}
             onSelect={selectCampaign}
+            onOpenCall={selectCall}
             onUploaded={(result) => {
               setSelectedCampaignId(result.campaign.id);
               void refresh(result.campaign.id);
@@ -995,7 +1268,7 @@ export function App() {
           />
         ) : null}
 
-        {activeTab === "calls" ? <CallsView calls={calls} /> : null}
+        {activeTab === "calls" ? <CallsView calls={calls} selectedCallId={selectedCallId} onSelectCall={selectCall} /> : null}
       </main>
     </div>
   );
