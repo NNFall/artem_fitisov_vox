@@ -1,5 +1,8 @@
 import asyncio
+import base64
 import csv
+import hashlib
+import hmac
 import io
 import json
 import logging
@@ -21,7 +24,9 @@ from aiogram.filters import Command
 from aiogram.types import BotCommand, FSInputFile, Message
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from dotenv import load_dotenv
-from fastapi import Depends, FastAPI, HTTPException, Path as ApiPath, Query, Request
+from fastapi import Cookie, Depends, FastAPI, File, HTTPException, Path as ApiPath, Query, Request, Response, UploadFile
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
 from sqlalchemy import or_
 from sqlalchemy.orm import Session
@@ -67,6 +72,23 @@ DOWNLOAD_RETRY_ATTEMPTS = max(1, int(os.getenv("DOWNLOAD_RETRY_ATTEMPTS", "3")))
 DOWNLOAD_RETRY_DELAY_MS = max(100, int(os.getenv("DOWNLOAD_RETRY_DELAY_MS", "1200")))
 RECORDING_DOWNLOAD_RETRY_DELAYS_SECONDS_STR = os.getenv("RECORDING_DOWNLOAD_RETRY_DELAYS_SECONDS", "0,30,60,180")
 VOXIMPLANT_CREDENTIALS_FILE_PATH = os.getenv("VOXIMPLANT_CREDENTIALS_FILE_PATH", "").strip()
+WEB_ADMIN_USERNAME = os.getenv("WEB_ADMIN_USERNAME", "admin").strip()
+WEB_ADMIN_PASSWORD = os.getenv("WEB_ADMIN_PASSWORD", "").strip()
+WEB_SESSION_SECRET = (
+    os.getenv("WEB_SESSION_SECRET", "").strip()
+    or BACKEND_WEBHOOK_SECRET
+    or "change-this-web-session-secret"
+)
+WEB_SESSION_COOKIE_NAME = os.getenv("WEB_SESSION_COOKIE_NAME", "artem_web_session").strip() or "artem_web_session"
+WEB_SESSION_TTL_SECONDS = max(3600, int(os.getenv("WEB_SESSION_TTL_SECONDS", "28800")))
+WEB_CORS_ORIGINS = [
+    item.strip().rstrip("/")
+    for item in os.getenv(
+        "WEB_CORS_ORIGINS",
+        "http://localhost:5173,http://127.0.0.1:5173,http://186.246.18.100:3002,http://186.246.18.100:8082",
+    ).split(",")
+    if item.strip()
+]
 
 RECORDINGS_DIR.mkdir(parents=True, exist_ok=True)
 IMPORTS_DIR.mkdir(parents=True, exist_ok=True)
@@ -150,6 +172,27 @@ class VoximplantStatusPayload(BaseModel):
     data: dict[str, Any] = Field(default_factory=dict)
 
 
+class WebLoginPayload(BaseModel):
+    username: str
+    password: str
+
+
+class WebDelayPayload(BaseModel):
+    delay_seconds: int = Field(ge=0, le=86400)
+
+
+class WebContactUpdatePayload(BaseModel):
+    phone: Optional[str] = None
+    name: Optional[str] = None
+    company: Optional[str] = None
+    city: Optional[str] = None
+    source: Optional[str] = None
+    task: Optional[str] = None
+    context: Optional[str] = None
+    preferred_time: Optional[str] = None
+    timezone: Optional[str] = None
+
+
 class CallReportPayload(BaseModel):
     report_type: str
     text: str
@@ -198,6 +241,65 @@ def get_db():
         yield db
     finally:
         db.close()
+
+
+def _b64encode_json(payload: dict[str, Any]) -> str:
+    raw = json.dumps(payload, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
+    return base64.urlsafe_b64encode(raw).decode("ascii").rstrip("=")
+
+
+def _b64decode_json(value: str) -> dict[str, Any]:
+    padded = value + "=" * (-len(value) % 4)
+    raw = base64.urlsafe_b64decode(padded.encode("ascii"))
+    parsed = json.loads(raw.decode("utf-8"))
+    return parsed if isinstance(parsed, dict) else {}
+
+
+def create_web_session_token(username: str) -> str:
+    issued_at = int(time.time())
+    payload = _b64encode_json({"u": username, "iat": issued_at, "exp": issued_at + WEB_SESSION_TTL_SECONDS})
+    signature = hmac.new(WEB_SESSION_SECRET.encode("utf-8"), payload.encode("ascii"), hashlib.sha256).hexdigest()
+    return f"{payload}.{signature}"
+
+
+def verify_web_session_token(token: str) -> Optional[str]:
+    if "." not in safe_text(token):
+        return None
+    payload, signature = token.rsplit(".", 1)
+    expected = hmac.new(WEB_SESSION_SECRET.encode("utf-8"), payload.encode("ascii"), hashlib.sha256).hexdigest()
+    if not hmac.compare_digest(signature, expected):
+        return None
+    try:
+        data = _b64decode_json(payload)
+    except Exception:  # noqa: BLE001
+        return None
+    if safe_int(data.get("exp")) is None or safe_int(data.get("exp")) < int(time.time()):
+        return None
+    username = safe_text(data.get("u")).strip()
+    return username or None
+
+
+def require_web_user(session_token: Optional[str] = Cookie(default=None, alias=WEB_SESSION_COOKIE_NAME)) -> str:
+    username = verify_web_session_token(session_token or "")
+    if not username:
+        raise HTTPException(status_code=401, detail="not authenticated")
+    return username
+
+
+def set_web_session_cookie(response: Response, username: str):
+    response.set_cookie(
+        key=WEB_SESSION_COOKIE_NAME,
+        value=create_web_session_token(username),
+        max_age=WEB_SESSION_TTL_SECONDS,
+        httponly=True,
+        samesite="lax",
+        secure=False,
+        path="/",
+    )
+
+
+def clear_web_session_cookie(response: Response):
+    response.delete_cookie(key=WEB_SESSION_COOKIE_NAME, path="/")
 
 
 def safe_text(value: Any) -> str:
@@ -1656,6 +1758,111 @@ async def create_campaign_from_rows(
     return campaign
 
 
+def web_campaign_payload(db: Session, campaign: Campaign) -> dict[str, Any]:
+    return {**campaign.as_dict(), "stats": get_campaign_stats(db, campaign.id)}
+
+
+def web_task_payload(task: Optional[OutboundTask]) -> Optional[dict[str, Any]]:
+    return task.as_dict() if task else None
+
+
+def web_contact_payload(contact: OutboundContact, task: Optional[OutboundTask] = None) -> dict[str, Any]:
+    raw_row = json_dict(contact.raw_row_json)
+    normalized = raw_row.get("normalized") if isinstance(raw_row.get("normalized"), dict) else {}
+    return {
+        **contact.as_dict(),
+        "attendance_status": normalized.get("attendance_status", ""),
+        "activity_type": normalized.get("activity_type", ""),
+        "is_decision_maker": normalized.get("is_decision_maker", ""),
+        "average_check": normalized.get("average_check", ""),
+        "traffic_source": normalized.get("traffic_source", ""),
+        "bot_impression": normalized.get("bot_impression", ""),
+        "task": web_task_payload(task),
+    }
+
+
+def web_call_payload(call: Call) -> dict[str, Any]:
+    payload = call.as_dict()
+    payload["recording_download_url"] = f"/web/recordings/{call.voximplant_session_id}" if call.local_recording_path else None
+    return payload
+
+
+def web_campaign_detail(db: Session, campaign: Campaign) -> dict[str, Any]:
+    contacts = (
+        db.query(OutboundContact)
+        .filter(OutboundContact.campaign_id == campaign.id)
+        .order_by(OutboundContact.id.asc())
+        .all()
+    )
+    tasks = (
+        db.query(OutboundTask)
+        .filter(OutboundTask.campaign_id == campaign.id)
+        .order_by(OutboundTask.id.asc())
+        .all()
+    )
+    task_by_contact_id = {task.contact_id: task for task in tasks}
+    calls = (
+        db.query(Call)
+        .filter(Call.campaign_id == campaign.id)
+        .order_by(Call.updated_at.desc(), Call.id.desc())
+        .limit(100)
+        .all()
+    )
+    events = (
+        db.query(OutboundEvent)
+        .filter(OutboundEvent.campaign_id == campaign.id)
+        .order_by(OutboundEvent.created_at.desc(), OutboundEvent.id.desc())
+        .limit(100)
+        .all()
+    )
+    return {
+        "campaign": web_campaign_payload(db, campaign),
+        "contacts": [web_contact_payload(contact, task_by_contact_id.get(contact.id)) for contact in contacts],
+        "tasks": [task.as_dict() for task in tasks],
+        "calls": [web_call_payload(call) for call in calls],
+        "events": [event.as_dict() for event in events],
+    }
+
+
+def reset_campaign_tasks(db: Session, campaign: Campaign):
+    now = datetime.utcnow()
+    tasks = db.query(OutboundTask).filter(OutboundTask.campaign_id == campaign.id).all()
+    for task in tasks:
+        task.status = "pending"
+        task.scheduled_at = now
+        task.started_at = None
+        task.finished_at = None
+        task.last_attempt_at = None
+        task.next_attempt_at = None
+        task.attempt_count = 0
+        task.voximplant_session_id = None
+        task.telegram_chat_id = None
+        task.telegram_message_id = None
+        task.telegram_message_refs_json = None
+        task.start_result_json = None
+        task.last_status = None
+        task.last_status_message = None
+        task.last_status_at = None
+        task.last_status_payload_json = None
+        task.result_status = None
+        task.result_summary = None
+        task.last_error = None
+        task.updated_at = now
+
+    campaign.status = "paused"
+    campaign.next_call_after = None
+    campaign.paused_at = now
+    campaign.updated_at = now
+
+
+def parse_uploaded_rows(filename: str, content: bytes) -> tuple[list[dict[str, Any]], str]:
+    suffix = Path(filename or "").suffix.lower()
+    if suffix not in {".csv", ".tsv", ".xlsx"}:
+        raise HTTPException(status_code=400, detail="unsupported file format")
+    raw_rows = read_xlsx_rows(content) if suffix == ".xlsx" else read_csv_rows(content, suffix)
+    return normalize_import_rows(raw_rows)
+
+
 def admin_only(handler):
     async def wrapper(message: Message):
         if not is_admin_chat(message.chat.id):
@@ -2060,6 +2267,15 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="Artem Fitisov Backend", lifespan=lifespan)
 
+if WEB_CORS_ORIGINS:
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=WEB_CORS_ORIGINS,
+        allow_credentials=True,
+        allow_methods=["*"],
+        allow_headers=["*"],
+    )
+
 
 @app.get("/")
 def read_root():
@@ -2069,6 +2285,279 @@ def read_root():
 @app.get("/healthz")
 def healthcheck():
     return {"ok": True, "time_utc": datetime.utcnow().isoformat()}
+
+
+@app.post("/web/auth/login")
+def web_login(payload: WebLoginPayload, response: Response):
+    if not WEB_ADMIN_PASSWORD:
+        raise HTTPException(status_code=503, detail="web auth is not configured")
+    username_ok = hmac.compare_digest(payload.username.strip(), WEB_ADMIN_USERNAME)
+    password_ok = hmac.compare_digest(payload.password, WEB_ADMIN_PASSWORD)
+    if not username_ok or not password_ok:
+        raise HTTPException(status_code=401, detail="invalid credentials")
+
+    set_web_session_cookie(response, WEB_ADMIN_USERNAME)
+    return {"ok": True, "username": WEB_ADMIN_USERNAME}
+
+
+@app.post("/web/auth/logout")
+def web_logout(response: Response):
+    clear_web_session_cookie(response)
+    return {"ok": True}
+
+
+@app.get("/web/auth/me")
+def web_me(username: str = Depends(require_web_user)):
+    return {"username": username}
+
+
+@app.get("/web/dashboard")
+def web_dashboard(
+    username: str = Depends(require_web_user),
+    db: Session = Depends(get_db),
+):
+    del username
+    task_pending = db.query(OutboundTask).filter(OutboundTask.status.in_(["pending", "scheduled"])).count()
+    task_active = db.query(OutboundTask).filter(OutboundTask.status.in_(["starting", "started", "in_progress"])).count()
+    task_completed = db.query(OutboundTask).filter(OutboundTask.status == "completed").count()
+    task_failed = db.query(OutboundTask).filter(OutboundTask.status == "failed").count()
+    campaigns_total = db.query(Campaign).count()
+    recent_calls = db.query(Call).order_by(Call.updated_at.desc(), Call.id.desc()).limit(8).all()
+    recent_campaigns = db.query(Campaign).order_by(Campaign.updated_at.desc(), Campaign.id.desc()).limit(8).all()
+    return {
+        "campaigns": {
+            "total": campaigns_total,
+            "active": db.query(Campaign).filter(Campaign.status == "active").count(),
+            "paused": db.query(Campaign).filter(Campaign.status == "paused").count(),
+            "recent": [web_campaign_payload(db, campaign) for campaign in recent_campaigns],
+        },
+        "contacts": {"total": db.query(OutboundContact).count()},
+        "tasks": {
+            "total": db.query(OutboundTask).count(),
+            "pending": task_pending,
+            "active": task_active,
+            "completed": task_completed,
+            "failed": task_failed,
+        },
+        "calls": {
+            "total": db.query(Call).count(),
+            "recent": [web_call_payload(call) for call in recent_calls],
+        },
+        "worker": {
+            "enabled": OUTBOUND_WORKER_ENABLED,
+            "rule_id": VOXIMPLANT_RULE_ID or None,
+            "public_backend_url": PUBLIC_BACKEND_URL or None,
+            "queue_interval_seconds": OUTBOUND_WORKER_INTERVAL_SECONDS,
+            "max_concurrent_calls": OUTBOUND_MAX_CONCURRENT_CALLS,
+        },
+    }
+
+
+@app.get("/web/campaigns")
+def web_list_campaigns(
+    username: str = Depends(require_web_user),
+    db: Session = Depends(get_db),
+):
+    del username
+    campaigns = db.query(Campaign).order_by(Campaign.id.desc()).limit(200).all()
+    return [web_campaign_payload(db, campaign) for campaign in campaigns]
+
+
+@app.get("/web/campaigns/{campaign_id}")
+def web_get_campaign(
+    campaign_id: int,
+    username: str = Depends(require_web_user),
+    db: Session = Depends(get_db),
+):
+    del username
+    campaign = db.query(Campaign).filter(Campaign.id == campaign_id).first()
+    if not campaign:
+        raise HTTPException(status_code=404, detail="campaign not found")
+    return web_campaign_detail(db, campaign)
+
+
+@app.post("/web/imports")
+async def web_upload_import(
+    file: UploadFile = File(...),
+    username: str = Depends(require_web_user),
+    db: Session = Depends(get_db),
+):
+    content = await file.read()
+    if not content:
+        raise HTTPException(status_code=400, detail="empty file")
+
+    rows, campaign_context = parse_uploaded_rows(file.filename or "upload", content)
+    if not rows:
+        raise HTTPException(status_code=400, detail="no contacts found")
+
+    saved_name = f"{datetime.utcnow().strftime('%Y%m%d_%H%M%S')}_{Path(file.filename or 'upload').name}"
+    (IMPORTS_DIR / saved_name).write_bytes(content)
+    campaign = await create_campaign_from_rows(
+        db,
+        rows=rows,
+        source_filename=file.filename or saved_name,
+        admin_chat_id=f"web:{username}",
+        campaign_context=campaign_context,
+    )
+    return {
+        "campaign": campaign.as_dict(),
+        "stats": get_campaign_stats(db, campaign.id),
+        "preview": rows[:20],
+    }
+
+
+@app.get("/web/template")
+def web_download_template(username: str = Depends(require_web_user)):
+    del username
+    template_path = ensure_forum_amix_template()
+    return FileResponse(
+        path=str(template_path),
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        filename=template_path.name,
+    )
+
+
+@app.post("/web/campaigns/{campaign_id}/run")
+def web_run_campaign(
+    campaign_id: int,
+    username: str = Depends(require_web_user),
+    db: Session = Depends(get_db),
+):
+    del username
+    campaign = db.query(Campaign).filter(Campaign.id == campaign_id).first()
+    if not campaign:
+        raise HTTPException(status_code=404, detail="campaign not found")
+    campaign.status = "active"
+    campaign.started_at = datetime.utcnow()
+    campaign.next_call_after = None
+    campaign.updated_at = datetime.utcnow()
+    db.commit()
+    return web_campaign_payload(db, campaign)
+
+
+@app.post("/web/campaigns/{campaign_id}/pause")
+def web_pause_campaign(
+    campaign_id: int,
+    username: str = Depends(require_web_user),
+    db: Session = Depends(get_db),
+):
+    del username
+    campaign = db.query(Campaign).filter(Campaign.id == campaign_id).first()
+    if not campaign:
+        raise HTTPException(status_code=404, detail="campaign not found")
+    campaign.status = "paused"
+    campaign.paused_at = datetime.utcnow()
+    campaign.updated_at = datetime.utcnow()
+    db.commit()
+    return web_campaign_payload(db, campaign)
+
+
+@app.post("/web/campaigns/{campaign_id}/rerun")
+def web_rerun_campaign(
+    campaign_id: int,
+    username: str = Depends(require_web_user),
+    db: Session = Depends(get_db),
+):
+    del username
+    campaign = db.query(Campaign).filter(Campaign.id == campaign_id).first()
+    if not campaign:
+        raise HTTPException(status_code=404, detail="campaign not found")
+    reset_campaign_tasks(db, campaign)
+    db.commit()
+    return web_campaign_payload(db, campaign)
+
+
+@app.post("/web/campaigns/{campaign_id}/delay")
+def web_update_campaign_delay(
+    campaign_id: int,
+    payload: WebDelayPayload,
+    username: str = Depends(require_web_user),
+    db: Session = Depends(get_db),
+):
+    del username
+    campaign = db.query(Campaign).filter(Campaign.id == campaign_id).first()
+    if not campaign:
+        raise HTTPException(status_code=404, detail="campaign not found")
+    campaign.call_delay_seconds = payload.delay_seconds
+    campaign.updated_at = datetime.utcnow()
+    db.commit()
+    return web_campaign_payload(db, campaign)
+
+
+@app.patch("/web/contacts/{contact_id}")
+def web_update_contact(
+    contact_id: int,
+    payload: WebContactUpdatePayload,
+    username: str = Depends(require_web_user),
+    db: Session = Depends(get_db),
+):
+    del username
+    contact = db.query(OutboundContact).filter(OutboundContact.id == contact_id).first()
+    if not contact:
+        raise HTTPException(status_code=404, detail="contact not found")
+
+    changes = payload.model_dump(exclude_unset=True)
+    if "phone" in changes:
+        normalized_phone = normalize_phone(changes["phone"])
+        if not normalized_phone:
+            raise HTTPException(status_code=400, detail="phone is empty")
+        contact.phone = normalized_phone
+        db.query(OutboundTask).filter(OutboundTask.contact_id == contact.id).update({"phone": normalized_phone})
+
+    for field_name in ("name", "company", "city", "source", "task", "context", "preferred_time", "timezone"):
+        if field_name in changes:
+            setattr(contact, field_name, safe_text(changes[field_name]).strip() or None)
+
+    contact.updated_at = datetime.utcnow()
+    db.commit()
+    db.refresh(contact)
+    task = (
+        db.query(OutboundTask)
+        .filter(OutboundTask.contact_id == contact.id)
+        .order_by(OutboundTask.id.desc())
+        .first()
+    )
+    return web_contact_payload(contact, task)
+
+
+@app.get("/web/calls")
+def web_list_calls(
+    username: str = Depends(require_web_user),
+    limit: int = Query(default=50, ge=1, le=500),
+    db: Session = Depends(get_db),
+):
+    del username
+    calls = db.query(Call).order_by(Call.updated_at.desc(), Call.id.desc()).limit(limit).all()
+    return [web_call_payload(call) for call in calls]
+
+
+@app.get("/web/calls/{session_id}")
+def web_get_call(
+    session_id: str = ApiPath(..., min_length=3),
+    username: str = Depends(require_web_user),
+    db: Session = Depends(get_db),
+):
+    del username
+    db_call = db.query(Call).filter(Call.voximplant_session_id == session_id).first()
+    if not db_call:
+        raise HTTPException(status_code=404, detail="call not found")
+    return web_call_payload(db_call)
+
+
+@app.get("/web/recordings/{session_id}")
+def web_get_recording(
+    session_id: str = ApiPath(..., min_length=3),
+    username: str = Depends(require_web_user),
+    db: Session = Depends(get_db),
+):
+    del username
+    db_call = db.query(Call).filter(Call.voximplant_session_id == session_id).first()
+    if not db_call or not db_call.local_recording_path:
+        raise HTTPException(status_code=404, detail="recording not found")
+    file_path = Path(db_call.local_recording_path)
+    if not file_path.exists() or not file_path.is_file():
+        raise HTTPException(status_code=404, detail="recording file not found")
+    return FileResponse(path=str(file_path), filename=file_path.name)
 
 
 @app.get("/calls")

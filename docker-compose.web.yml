@@ -15,3 +15,14 @@ services:
     ports:
       - "8002:8000"
     restart: unless-stopped
+
+  artem-fitisov-web-frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: artem-fitisov-web-frontend
+    ports:
+      - "3002:80"
+    depends_on:
+      - artem-fitisov-web-backend
+    restart: unless-stopped

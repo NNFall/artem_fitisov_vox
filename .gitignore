@@ -5,8 +5,13 @@ backend/__pycache__/
 backend/*.pyc
 backend/voximplant.db
 backend/backend.log
+backend/templates/*
 backend/recordings/*
 !backend/recordings/.gitkeep
 backend/imports/*
 !backend/imports/.gitkeep
 .pytest_cache/
+tests/__pycache__/
+frontend/node_modules/
+frontend/dist/
+frontend/*.tsbuildinfo

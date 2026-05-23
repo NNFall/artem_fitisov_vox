@@ -3,6 +3,7 @@ uvicorn
 aiogram
 pydantic
 python-dotenv
+python-multipart
 sqlalchemy
 apscheduler
 aiohttp
