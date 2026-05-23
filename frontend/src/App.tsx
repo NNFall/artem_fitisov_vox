@@ -3,6 +3,7 @@ import { API_BASE, api } from "./api";
 import type { Call, Campaign, CampaignDetail, Contact, Dashboard, ImportResult } from "./types";
 
 type Tab = "dashboard" | "campaigns" | "calls";
+type CampaignAction = "run" | "pause" | "rerun";
 type GlyphName =
   | "brand"
   | "dashboard"
@@ -25,7 +26,9 @@ type GlyphName =
   | "save"
   | "close"
   | "wave"
-  | "arrow";
+  | "arrow"
+  | "skipBack"
+  | "skipForward";
 
 const statusLabels: Record<string, string> = {
   active: "запущена",
@@ -54,6 +57,11 @@ const statusLabels: Record<string, string> = {
   websocket_close: "соединение закрыто",
   client_hangup: "клиент завершил",
   hangup: "звонок завершён",
+  ready: "готово к обзвону",
+  not_started: "ещё не запускали",
+  queued: "в очереди",
+  retry_wait: "ожидает повтора",
+  cancelled: "отменено",
 };
 
 const navItems: Array<{ tab: Tab; label: string; icon: GlyphName }> = [
@@ -68,9 +76,9 @@ function statusRu(value?: string | null) {
 }
 
 function statusTone(value?: string | null) {
-  if (value === "active" || value === "completed" || value === "finalized" || value === "call_disconnected") return "good";
-  if (value === "failed" || value === "call_failed" || value === "call_timeout" || value === "dial_error") return "bad";
-  if (value === "started" || value === "starting" || value === "in_progress") return "busy";
+  if (value === "active" || value === "completed" || value === "finalized" || value === "call_disconnected" || value === "hangup" || value === "client_hangup") return "good";
+  if (value === "failed" || value === "call_failed" || value === "call_timeout" || value === "dial_error" || value === "max_call_duration") return "bad";
+  if (value === "started" || value === "starting" || value === "in_progress" || value === "queued" || value === "scheduled" || value === "retry_wait") return "busy";
   return "muted";
 }
 
@@ -90,6 +98,19 @@ function formatDelay(seconds?: number | null) {
   const value = Number(seconds || 0);
   if (value >= 60 && value % 60 === 0) return `${value / 60} мин`;
   return `${value} сек`;
+}
+
+function pluralRu(value: number, one: string, few: string, many: string) {
+  const abs = Math.abs(value);
+  const mod10 = abs % 10;
+  const mod100 = abs % 100;
+  if (mod10 === 1 && mod100 !== 11) return one;
+  if (mod10 >= 2 && mod10 <= 4 && (mod100 < 12 || mod100 > 14)) return few;
+  return many;
+}
+
+function formatCount(value: number, one: string, few: string, many: string) {
+  return `${value} ${pluralRu(value, one, few, many)}`;
 }
 
 function formatDuration(seconds?: number | null) {
@@ -118,6 +139,28 @@ function callShortResult(call: Call) {
 
 function recordingSource(call: Call) {
   return call.recording_download_url ? `${API_BASE}${call.recording_download_url}` : "";
+}
+
+function splitFacts(text?: string | null) {
+  return String(text || "")
+    .replace(/\s+/g, " ")
+    .split(/(?<=[.!?])\s+|;\s+|\n+/)
+    .map((item) => item.trim())
+    .filter(Boolean)
+    .slice(0, 5);
+}
+
+function extractRating(text?: string | null) {
+  const match = String(text || "").match(/(\d{1,2})\s*(?:из|\/)\s*10/i);
+  if (!match) return "";
+  const value = Math.max(0, Math.min(10, Number(match[1])));
+  return `${value} из 10`;
+}
+
+function callHumanReason(call: Call) {
+  const status = statusRu(call.status);
+  if (status === "не указано") return "звонок обработан без отдельной причины";
+  return status;
 }
 
 function Glyph({ name, size = 18, className = "" }: { name: GlyphName; size?: number; className?: string }) {
@@ -328,6 +371,24 @@ function Glyph({ name, size = 18, className = "" }: { name: GlyphName; size?: nu
     );
   }
 
+  if (name === "skipBack") {
+    return (
+      <svg {...common}>
+        <path d="M11 7 6 12l5 5M18 7l-5 5 5 5" {...stroke} />
+        <path d="M6 12h12" {...stroke} />
+      </svg>
+    );
+  }
+
+  if (name === "skipForward") {
+    return (
+      <svg {...common}>
+        <path d="m13 7 5 5-5 5M6 7l5 5-5 5" {...stroke} />
+        <path d="M6 12h12" {...stroke} />
+      </svg>
+    );
+  }
+
   return (
     <svg {...common}>
       <path d="M5 6.5h14v11H5z" {...stroke} />
@@ -389,7 +450,7 @@ function AppHeader({
       <div className="sidebar-footer">
         <button type="button" className="ghost-button" onClick={onRefresh} disabled={loading}>
           <Glyph name="refresh" size={17} className={loading ? "spin" : ""} />
-          <span>Обновить</span>
+          <span>{loading ? "Обновляю" : "Обновить"}</span>
         </button>
         <button type="button" className="ghost-button danger" onClick={onLogout}>
           <Glyph name="logout" size={17} />
@@ -697,7 +758,7 @@ function CampaignsView({
             >
               <span>
                 <strong>#{campaign.id} {campaign.name}</strong>
-                <small>{campaign.stats?.total || 0} контактов · {formatDelay(campaign.call_delay_seconds)}</small>
+                <small>{formatCount(campaign.stats?.total || 0, "контакт", "контакта", "контактов")} · {formatDelay(campaign.call_delay_seconds)}</small>
               </span>
               <span className={`status-pill ${statusTone(campaign.status)}`}>{statusRu(campaign.status)}</span>
             </button>
@@ -708,6 +769,12 @@ function CampaignsView({
 
       {selected ? (
         <CampaignDetailView detail={selected} onAction={onAction} onOpenCall={onOpenCall} />
+      ) : filtered.length ? (
+        <section className="panel empty-detail loading-detail">
+          <Glyph name="refresh" size={30} className="spin" />
+          <h2>Открываю кампанию</h2>
+          <p>Загружаю контакты, статусы задач и звонки по выбранной базе.</p>
+        </section>
       ) : (
         <section className="panel empty-detail">
           <Glyph name="campaigns" size={30} />
@@ -730,17 +797,49 @@ function CampaignDetailView({
 }) {
   const [delay, setDelay] = useState(String(detail.campaign.call_delay_seconds || 0));
   const [savingAction, setSavingAction] = useState("");
+  const [pendingAction, setPendingAction] = useState<CampaignAction | null>(null);
   const [error, setError] = useState("");
+  const totalContacts = detail.campaign.stats?.total || detail.contacts.length || 0;
+  const waitingContacts = (detail.campaign.stats?.pending || 0) + (detail.campaign.stats?.scheduled || 0);
+  const failedContacts = detail.campaign.stats?.failed || 0;
+  const isRunning = ["active", "starting", "in_progress"].includes(detail.campaign.status);
+  const runDisabled = savingAction !== "" || isRunning || totalContacts === 0;
+  const pauseDisabled = savingAction !== "" || !isRunning;
+  const rerunDisabled = savingAction !== "" || totalContacts === 0;
+  const confirmCopy = pendingAction
+    ? {
+        run: {
+          title: "Запустить обзвон?",
+          text: `Кампания начнёт брать контакты из очереди. Сейчас ожидают ${waitingContacts} ${pluralRu(waitingContacts, "контакт", "контакта", "контактов")}.`,
+          confirm: "Запустить",
+          tone: "primary",
+        },
+        pause: {
+          title: "Поставить кампанию на паузу?",
+          text: "Новые звонки перестанут запускаться. Уже начатый звонок не будет оборван этим действием.",
+          confirm: "Поставить на паузу",
+          tone: "secondary",
+        },
+        rerun: {
+          title: "Подготовить повторный запуск?",
+          text: `Будут сброшены статусы по ${totalContacts} ${pluralRu(totalContacts, "контакту", "контактам", "контактам")}. Ошибок сейчас: ${failedContacts}. После этого кампания останется на паузе.`,
+          confirm: "Сбросить статусы",
+          tone: "danger",
+        },
+      }[pendingAction]
+    : null;
 
   useEffect(() => {
     setDelay(String(detail.campaign.call_delay_seconds || 0));
+    setPendingAction(null);
   }, [detail.campaign.id, detail.campaign.call_delay_seconds]);
 
-  async function runAction(action: "run" | "pause" | "rerun") {
+  async function runAction(action: CampaignAction) {
     setSavingAction(action);
     setError("");
     try {
       await api.setCampaignStatus(detail.campaign.id, action);
+      setPendingAction(null);
       onAction();
     } catch (err) {
       setError(err instanceof Error ? err.message : "Не удалось выполнить действие");
@@ -773,17 +872,17 @@ function CampaignDetailView({
       </div>
 
       <div className="actions-bar">
-        <button type="button" className="primary-button" onClick={() => runAction("run")} disabled={savingAction !== ""}>
+        <button type="button" className="primary-button" onClick={() => setPendingAction("run")} disabled={runDisabled}>
           {savingAction === "run" ? <Glyph name="refresh" size={16} className="spin" /> : <Glyph name="play" size={16} />}
-          <span>Запустить</span>
+          <span>{isRunning ? "Уже запущена" : "Запустить обзвон"}</span>
         </button>
-        <button type="button" className="secondary-button" onClick={() => runAction("pause")} disabled={savingAction !== ""}>
+        <button type="button" className="secondary-button" onClick={() => setPendingAction("pause")} disabled={pauseDisabled}>
           <Glyph name="pause" size={16} />
-          <span>Пауза</span>
+          <span>Поставить на паузу</span>
         </button>
-        <button type="button" className="secondary-button" onClick={() => runAction("rerun")} disabled={savingAction !== ""}>
+        <button type="button" className="secondary-button" onClick={() => setPendingAction("rerun")} disabled={rerunDisabled}>
           <Glyph name="redo" size={16} />
-          <span>Повторить</span>
+          <span>Повторить по {totalContacts}</span>
         </button>
         <label className="delay-control">
           <Glyph name="clock" size={16} />
@@ -794,6 +893,24 @@ function CampaignDetailView({
           </button>
         </label>
       </div>
+
+      {confirmCopy && pendingAction ? (
+        <div className={`confirm-sheet ${confirmCopy.tone}`}>
+          <div>
+            <strong>{confirmCopy.title}</strong>
+            <p>{confirmCopy.text}</p>
+          </div>
+          <div className="confirm-actions">
+            <button type="button" className="secondary-button" onClick={() => setPendingAction(null)} disabled={savingAction !== ""}>
+              Отмена
+            </button>
+            <button type="button" className={confirmCopy.tone === "danger" ? "danger-button" : "primary-button"} onClick={() => runAction(pendingAction)} disabled={savingAction !== ""}>
+              {savingAction === pendingAction ? <Glyph name="refresh" size={16} className="spin" /> : null}
+              <span>{confirmCopy.confirm}</span>
+            </button>
+          </div>
+        </div>
+      ) : null}
 
       {error ? <div className="inline-error"><Glyph name="alert" size={16} /><span>{error}</span></div> : null}
 
@@ -929,7 +1046,7 @@ function CallsView({
           <p>Разбор разговоров</p>
           <h1>Звонки</h1>
         </div>
-        <span className="status-pill muted">{calls.length} записей</span>
+        <span className="status-pill muted">{formatCount(calls.length, "запись", "записи", "записей")}</span>
       </div>
 
       <section className="calls-lane">
@@ -998,10 +1115,12 @@ function AudioPlayer({ src }: { src: string }) {
   const [playing, setPlaying] = useState(false);
   const [current, setCurrent] = useState(0);
   const [duration, setDuration] = useState(0);
+  const [speed, setSpeed] = useState(1);
+  const [playerState, setPlayerState] = useState<"loading" | "ready" | "error">("loading");
 
   async function toggle() {
     const audio = audioRef.current;
-    if (!audio) return;
+    if (!audio || playerState === "error") return;
     if (audio.paused) {
       await audio.play();
       setPlaying(true);
@@ -1019,21 +1138,51 @@ function AudioPlayer({ src }: { src: string }) {
     setCurrent(next);
   }
 
+  function jump(delta: number) {
+    const audio = audioRef.current;
+    if (!audio) return;
+    const next = Math.max(0, Math.min(duration || audio.duration || 0, audio.currentTime + delta));
+    audio.currentTime = next;
+    setCurrent(next);
+  }
+
+  function cycleSpeed() {
+    const speeds = [1, 1.25, 1.5, 2];
+    const next = speeds[(speeds.indexOf(speed) + 1) % speeds.length];
+    setSpeed(next);
+    if (audioRef.current) audioRef.current.playbackRate = next;
+  }
+
   return (
-    <div className="voice-player">
+    <div className={`voice-player ${playerState}`}>
       <audio
         ref={audioRef}
         preload="metadata"
         src={src}
-        onLoadedMetadata={(event) => setDuration(event.currentTarget.duration || 0)}
+        onLoadStart={() => setPlayerState("loading")}
+        onLoadedMetadata={(event) => {
+          const audio = event.currentTarget;
+          setDuration(audio.duration || 0);
+          audio.playbackRate = speed;
+          setPlayerState("ready");
+        }}
+        onCanPlay={() => setPlayerState("ready")}
+        onError={() => {
+          setPlayerState("error");
+          setPlaying(false);
+        }}
         onTimeUpdate={(event) => setCurrent(event.currentTarget.currentTime || 0)}
         onPause={() => setPlaying(false)}
         onEnded={() => setPlaying(false)}
       />
-      <button type="button" className="player-button" onClick={toggle} aria-label={playing ? "Пауза" : "Воспроизвести"}>
+      <button type="button" className="player-button" onClick={toggle} disabled={playerState === "error"} aria-label={playing ? "Пауза" : "Воспроизвести"}>
         <Glyph name={playing ? "pause" : "play"} size={18} />
       </button>
       <div className="player-main">
+        <div className="player-meta">
+          <strong>{playerState === "loading" ? "Готовлю запись" : playerState === "error" ? "Запись не открылась" : "Запись готова"}</strong>
+          <span>{playerState === "error" ? "Попробуйте обновить страницу или проверить файл позже." : "Можно слушать и быстро перематывать разговор."}</span>
+        </div>
         <div className="wave-strip" aria-hidden="true">
           {Array.from({ length: 26 }).map((_, index) => (
             <span
@@ -1053,7 +1202,21 @@ function AudioPlayer({ src }: { src: string }) {
           value={Math.min(current, duration || 0)}
           onChange={(event) => seek(event.target.value)}
           aria-label="Позиция записи"
+          disabled={playerState === "error"}
         />
+        <div className="player-tools">
+          <button type="button" onClick={() => jump(-15)} disabled={playerState === "error"}>
+            <Glyph name="skipBack" size={15} />
+            <span>15 сек</span>
+          </button>
+          <button type="button" onClick={() => jump(15)} disabled={playerState === "error"}>
+            <span>15 сек</span>
+            <Glyph name="skipForward" size={15} />
+          </button>
+          <button type="button" onClick={cycleSpeed} disabled={playerState === "error"}>
+            {speed}x
+          </button>
+        </div>
       </div>
       <span className="player-time">{formatDuration(Math.round(current))} / {formatDuration(Math.round(duration || 0))}</span>
     </div>
@@ -1081,6 +1244,9 @@ function CallResultPanel({ call }: { call: Call | null }) {
   }
 
   const src = recordingSource(call);
+  const facts = splitFacts(call.summary || call.outcome || call.dialogue_text);
+  const rating = extractRating(call.summary || call.outcome || call.dialogue_text);
+  const hasProblem = statusTone(call.status) === "bad";
 
   return (
     <aside className="call-inspector">
@@ -1094,28 +1260,47 @@ function CallResultPanel({ call }: { call: Call | null }) {
       </div>
 
       <div className="result-hero">
-        <span>Итог разговора</span>
+        <div className="result-eyebrow">
+          <span>Итог разговора</span>
+          <span className={`result-chip ${hasProblem ? "bad" : "good"}`}>{hasProblem ? "требует внимания" : "обработан"}</span>
+        </div>
         <strong>{callShortResult(call)}</strong>
       </div>
 
       <div className="result-grid">
-        <ResultLine label="Длительность" value={formatDuration(call.duration)} />
+        <ResultLine label="Причина статуса" value={callHumanReason(call)} />
         <ResultLine label="Следующий шаг" value={call.next_step} />
-        <ResultLine label="Статус записи" value={statusRu(call.recording_status)} />
-        <ResultLine label="Кампания" value={call.campaign_id ? `#${call.campaign_id}` : ""} />
+        <ResultLine label="Оценка AI" value={rating || "не зафиксирована"} />
+        <ResultLine label="Длительность" value={formatDuration(call.duration)} />
       </div>
+
+      <section className="inspector-section facts-section">
+        <div className="section-kicker">
+          <Glyph name="done" size={16} />
+          <span>Собранные данные</span>
+        </div>
+        {facts.length ? (
+          <div className="facts-list">
+            {facts.map((fact, index) => (
+              <span key={`${fact}-${index}`}>{fact}</span>
+            ))}
+          </div>
+        ) : (
+          <div className="recording-empty">Данных по разговору пока нет. Они появятся после обработки звонка.</div>
+        )}
+      </section>
 
       <section className="inspector-section">
         <div className="section-kicker">
           <Glyph name="wave" size={16} />
           <span>Запись разговора</span>
         </div>
-        {src ? <AudioPlayer src={src} /> : <div className="recording-empty">Запись ещё не скачана или недоступна.</div>}
+        {src ? <AudioPlayer src={src} /> : <div className="recording-empty">Запись ещё готовится. Обычно файл появляется через несколько минут после звонка.</div>}
       </section>
 
       <section className="inspector-section">
         <div className="section-kicker">
-          <Glyph name="done" size={16} />
+          <Glyph name="campaigns" size={16} />
           <span>Сводка</span>
         </div>
         <p className="detail-copy">{compactText(call.summary || call.outcome, "Сводка по звонку пока не пришла.")}</p>
@@ -1123,10 +1308,10 @@ function CallResultPanel({ call }: { call: Call | null }) {
 
       <section className="inspector-section">
         <div className="section-kicker">
-          <Glyph name="campaigns" size={16} />
+          <Glyph name="calls" size={16} />
           <span>Диалог</span>
         </div>
-        <pre className="dialogue-box">{compactText(call.dialogue_text, "Текст диалога пока не сохранён.")}</pre>
+        <pre className="dialogue-box">{compactText(call.dialogue_text, "Текст диалога пока не сохранён. Проверьте запись разговора или дождитесь транскрибации.")}</pre>
       </section>
     </aside>
   );
