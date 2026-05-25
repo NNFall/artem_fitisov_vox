@@ -2664,6 +2664,28 @@ def web_list_calls(
     return [web_call_payload(call) for call in calls]
 
 
+@app.get("/web/call-history")
+def web_call_history(
+    phone: str = Query(..., min_length=3),
+    username: str = Depends(require_web_user),
+    limit: int = Query(default=100, ge=1, le=300),
+    db: Session = Depends(get_db),
+):
+    del username
+    normalized_phone = normalize_phone(phone)
+    if not normalized_phone:
+        raise HTTPException(status_code=400, detail="phone is empty")
+
+    calls = (
+        db.query(Call)
+        .filter(or_(Call.client_phone == normalized_phone, Call.caller_phone == normalized_phone))
+        .order_by(Call.updated_at.desc(), Call.id.desc())
+        .limit(limit)
+        .all()
+    )
+    return [web_call_payload(call) for call in calls]
+
+
 @app.get("/web/calls/{session_id}")
 def web_get_call(
     session_id: str = ApiPath(..., min_length=3),

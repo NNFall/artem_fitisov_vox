@@ -12,6 +12,8 @@ import {
   LogOut,
   Pause,
   Phone,
+  PhoneIncoming,
+  PhoneOutgoing,
   Play,
   RefreshCw,
   RotateCcw,
@@ -27,6 +29,18 @@ import type { Call, Campaign, CampaignDetail, Contact, Dashboard, ImportResult, 
 
 type DetailTab = "contacts" | "tasks" | "calls" | "events";
 type CampaignAction = "run" | "pause" | "rerun";
+type CallDirection = "incoming" | "outgoing";
+type DialogueRole = "ai" | "client" | "unknown";
+type DialogueTurn = {
+  role: DialogueRole;
+  label: string;
+  text: string;
+};
+type ContactHistory = {
+  phone: string;
+  name: string;
+  calls: Call[];
+};
 
 const statusLabels: Record<string, string> = {
   active: "Активна",
@@ -70,9 +84,9 @@ const statusLabels: Record<string, string> = {
 };
 
 const detailTabs: Array<{ id: DetailTab; label: string; icon: typeof UserRound }> = [
+  { id: "calls", label: "Звонки", icon: Phone },
   { id: "contacts", label: "Контакты", icon: UserRound },
   { id: "tasks", label: "Задачи", icon: FileSpreadsheet },
-  { id: "calls", label: "Звонки", icon: Phone },
   { id: "events", label: "События", icon: Clock3 },
 ];
 
@@ -171,6 +185,72 @@ function callPhone(call: Call) {
 
 function callSummary(call: Call) {
   return compactText(call.summary || call.outcome || call.next_step, "Итог пока не заполнен");
+}
+
+function callDirection(call: Call): { type: CallDirection; label: string; Icon: typeof PhoneIncoming } {
+  const scriptName = String(call.script_name || "").toLowerCase();
+  if (scriptName.includes("inbound") || (!call.campaign_id && !call.outbound_task_id && call.caller_phone)) {
+    return { type: "incoming", label: "Входящий", Icon: PhoneIncoming };
+  }
+  return { type: "outgoing", label: "Исходящий", Icon: PhoneOutgoing };
+}
+
+function normalizePhoneForCompare(value?: string | null) {
+  return String(value || "").replace(/\D/g, "");
+}
+
+function sameCallPhone(call: Call, phone?: string | null) {
+  const target = normalizePhoneForCompare(phone);
+  if (!target) return false;
+  return [call.client_phone, call.caller_phone].some((value) => normalizePhoneForCompare(value) === target);
+}
+
+function callDateValue(call: Call) {
+  return call.finished_at || call.updated_at || call.started_at || call.connected_at;
+}
+
+function inferDialogueRole(label: string): DialogueRole {
+  const normalized = label.trim().toLowerCase();
+  if (!normalized) return "unknown";
+  if (/(ai|assistant|model|bot|gemini|екатерин|бот|робот|нейросет|ассистент|менеджер)/i.test(normalized)) return "ai";
+  if (/(client|user|caller|клиент|пользователь|собеседник|абонент|человек|участник)/i.test(normalized)) return "client";
+  return "unknown";
+}
+
+function parseDialogue(text?: string | null, clientName?: string | null): DialogueTurn[] {
+  const source = String(text || "").trim();
+  if (!source) return [];
+
+  const client = compactText(clientName, "Клиент");
+  const turns: DialogueTurn[] = [];
+  const lines = source
+    .split(/\r?\n+/)
+    .map((line) => line.trim())
+    .filter(Boolean);
+
+  lines.forEach((line) => {
+    const cleaned = line.replace(/^\[[^\]]+\]\s*/, "").trim();
+    const match = cleaned.match(/^([^:：]{2,42})[:：]\s*(.+)$/);
+    if (match) {
+      const label = match[1].trim();
+      const role = inferDialogueRole(label);
+      turns.push({
+        role,
+        label: role === "ai" ? "Екатерина AI" : role === "client" ? client : label,
+        text: match[2].trim(),
+      });
+      return;
+    }
+
+    const last = turns[turns.length - 1];
+    if (last && last.role === "unknown") {
+      last.text = `${last.text}\n${cleaned}`;
+      return;
+    }
+    turns.push({ role: "unknown", label: "Фрагмент", text: cleaned });
+  });
+
+  return turns;
 }
 
 function splitFacts(text?: string | null) {
@@ -660,22 +740,28 @@ function CampaignCalls({ calls, onOpen }: { calls: Call[]; onOpen: (call: Call) 
   return (
     <div className="data-table calls-table">
       <div className="table-head">
+        <span>Тип</span>
         <span>Клиент</span>
         <span>Итог</span>
         <span>Длительность</span>
         <span>Саммари</span>
       </div>
-      {calls.map((call) => (
-        <button type="button" key={call.id} className="table-row" onClick={() => onOpen(call)}>
-          <span>
-            <strong>{callName(call)}</strong>
-            <small>{callPhone(call)}</small>
-          </span>
-          <span><span className={`status-pill ${statusTone(call.status)}`}>{statusRu(call.status)}</span></span>
-          <span>{formatDuration(call.duration)}</span>
-          <span className="summary-cell">{callSummary(call)}</span>
-        </button>
-      ))}
+      {calls.map((call) => {
+        const direction = callDirection(call);
+        const DirectionIcon = direction.Icon;
+        return (
+          <button type="button" key={call.id} className="table-row" onClick={() => onOpen(call)}>
+            <span><span className={`direction-pill ${direction.type}`}><DirectionIcon size={14} />{direction.label}</span></span>
+            <span>
+              <strong>{callName(call)}</strong>
+              <small>{callPhone(call)}</small>
+            </span>
+            <span><span className={`status-pill ${statusTone(call.status)}`}>{statusRu(call.status)}</span></span>
+            <span>{formatDuration(call.duration)}</span>
+            <span className="summary-cell">{callSummary(call)}</span>
+          </button>
+        );
+      })}
       {!calls.length ? <EmptyBlock title="Звонков нет" text="Когда начнется обзвон, здесь появятся результаты и записи." /> : null}
     </div>
   );
@@ -703,10 +789,12 @@ function ContactDetail({
   contact,
   onBack,
   onSaved,
+  onOpenHistory,
 }: {
   contact: Contact;
   onBack: () => void;
   onSaved: () => void;
+  onOpenHistory: (phone: string, name: string) => void;
 }) {
   const [draft, setDraft] = useState({
     name: contact.name || "",
@@ -741,7 +829,13 @@ function ContactDetail({
             <h2>{compactText(contact.name, "Без имени")}</h2>
             <p>{compactText(contact.company)} · {compactText(contact.phone)}</p>
           </div>
-          <span className={`status-pill ${statusTone(contact.task?.status)}`}>{statusRu(contact.task?.status)}</span>
+          <div className="object-actions">
+            <button type="button" className="action-button secondary" onClick={() => onOpenHistory(contact.phone, compactText(contact.name, "Без имени"))}>
+              <Clock3 size={17} />
+              <span>История звонков</span>
+            </button>
+            <span className={`status-pill ${statusTone(contact.task?.status)}`}>{statusRu(contact.task?.status)}</span>
+          </div>
         </div>
 
         <div className="edit-grid">
@@ -771,12 +865,23 @@ function ContactDetail({
   );
 }
 
-function CallDetail({ call, onBack }: { call: Call; onBack: () => void }) {
+function CallDetail({
+  call,
+  onBack,
+  onOpenHistory,
+}: {
+  call: Call;
+  onBack: () => void;
+  onOpenHistory: (phone: string, name: string) => void;
+}) {
   const facts = splitFacts(call.summary || call.outcome || call.dialogue_text);
   const src = recordingSource(call);
   const externalRecordingUrl = recordingExternalUrl(call);
   const recordingWasNotStarted = call.recording_status === "not_started";
   const recordingUrlMissing = !src && !externalRecordingUrl && ["ready", "recording_ready"].includes(call.recording_status || "");
+  const direction = callDirection(call);
+  const DirectionIcon = direction.Icon;
+  const dialogueTurns = parseDialogue(call.dialogue_text, call.client_name);
 
   return (
     <div className="screen-stack enter">
@@ -790,9 +895,16 @@ function CallDetail({ call, onBack }: { call: Call; onBack: () => void }) {
           <div>
             <p className="eyebrow">Звонок #{shortId(call.session_id || call.id)}</p>
             <h2>{callName(call)}</h2>
-            <p>{callPhone(call)} · {formatDate(call.updated_at || call.started_at)}</p>
+            <p>{callPhone(call)} · {formatDate(callDateValue(call))}</p>
           </div>
-          <span className={`status-pill ${statusTone(call.status)}`}>{statusRu(call.status)}</span>
+          <div className="object-actions">
+            <span className={`direction-pill ${direction.type}`}><DirectionIcon size={15} />{direction.label}</span>
+            <button type="button" className="action-button secondary" onClick={() => onOpenHistory(callPhone(call), callName(call))}>
+              <Clock3 size={17} />
+              <span>История клиента</span>
+            </button>
+            <span className={`status-pill ${statusTone(call.status)}`}>{statusRu(call.status)}</span>
+          </div>
         </div>
 
         <div className="call-result-hero">
@@ -801,10 +913,10 @@ function CallDetail({ call, onBack }: { call: Call; onBack: () => void }) {
         </div>
 
         <div className="contact-facts call-facts">
+          <ResultLine label="Тип звонка" value={direction.label} />
           <ResultLine label="Длительность" value={formatDuration(call.duration)} />
           <ResultLine label="Следующий шаг" value={call.next_step} />
           <ResultLine label="Статус записи" value={statusRu(call.recording_status)} />
-          <ResultLine label="ID сессии" value={call.session_id} />
         </div>
 
         <section className="detail-section">
@@ -841,13 +953,112 @@ function CallDetail({ call, onBack }: { call: Call; onBack: () => void }) {
 
         <section className="detail-section">
           <h3>Сводка</h3>
-          <p className="text-box">{compactText(call.summary || call.outcome, "Сводка по звонку пока не пришла.")}</p>
+          <div className="summary-panel">
+            <ResultLine label="Итог" value={call.outcome || statusRu(call.status)} />
+            <ResultLine label="Следующий шаг" value={call.next_step} />
+            <ResultLine label="Кратко" value={call.summary || call.outcome} />
+          </div>
         </section>
 
         <section className="detail-section">
           <h3>Диалог</h3>
-          <pre className="dialogue-box">{compactText(call.dialogue_text, "Текст диалога пока не сохранен.")}</pre>
+          <DialogueThread turns={dialogueTurns} />
         </section>
+      </section>
+    </div>
+  );
+}
+
+function DialogueThread({ turns }: { turns: DialogueTurn[] }) {
+  if (!turns.length) {
+    return <EmptyBlock title="Диалог пока не сохранен" text="Когда сервер получит текст разговора, он появится здесь по репликам клиента и AI." compact />;
+  }
+
+  return (
+    <div className="dialogue-thread">
+      {turns.map((turn, index) => (
+        <article className={`dialogue-turn ${turn.role}`} key={`${turn.label}-${index}`}>
+          <span className="speaker-badge">{turn.label}</span>
+          <p>{turn.text}</p>
+        </article>
+      ))}
+    </div>
+  );
+}
+
+function ContactHistoryPage({
+  history,
+  campaigns,
+  onBack,
+  onOpenCall,
+  onOpenCampaign,
+}: {
+  history: ContactHistory;
+  campaigns: Campaign[];
+  onBack: () => void;
+  onOpenCall: (call: Call) => void;
+  onOpenCampaign: (id: number) => void;
+}) {
+  const completed = history.calls.filter((call) => statusTone(call.status) === "good").length;
+  const missed = history.calls.filter((call) => statusTone(call.status) === "bad").length;
+  const lastCall = history.calls[0];
+
+  return (
+    <div className="screen-stack enter">
+      <button type="button" className="back-button" onClick={onBack}>
+        <ArrowLeft size={20} />
+        <span>Назад</span>
+      </button>
+
+      <section className="object-detail-card history-detail-card">
+        <div className="object-head">
+          <div>
+            <p className="eyebrow">История клиента</p>
+            <h2>{history.name}</h2>
+            <p>{history.phone} · {formatCount(history.calls.length, "касание", "касания", "касаний")}</p>
+          </div>
+          {lastCall ? <span className={`status-pill ${statusTone(lastCall.status)}`}>{statusRu(lastCall.status)}</span> : null}
+        </div>
+
+        <div className="detail-metrics compact-metrics">
+          <MetricCard label="Всего звонков" value={history.calls.length} />
+          <MetricCard label="Разговоры" value={completed} tone="good" />
+          <MetricCard label="Не состоялись" value={missed} tone="bad" />
+        </div>
+
+        <div className="history-timeline">
+          {history.calls.map((call) => {
+            const direction = callDirection(call);
+            const DirectionIcon = direction.Icon;
+            const campaign = campaigns.find((item) => item.id === call.campaign_id);
+            return (
+              <article className="history-item" key={call.id}>
+                <button type="button" className={`history-rail ${direction.type}`} onClick={() => onOpenCall(call)} aria-label="Открыть звонок">
+                  <DirectionIcon size={18} />
+                </button>
+                <div className="history-body">
+                  <div className="history-row">
+                    <span className={`direction-pill ${direction.type}`}><DirectionIcon size={14} />{direction.label}</span>
+                    <time>{formatDate(callDateValue(call))}</time>
+                    <span className={`status-pill ${statusTone(call.status)}`}>{statusRu(call.status)}</span>
+                  </div>
+                  <button type="button" className="history-summary" onClick={() => onOpenCall(call)}>
+                    <strong>{callSummary(call)}</strong>
+                    <span>{formatDuration(call.duration)} · сессия {shortId(call.session_id)}</span>
+                  </button>
+                  {campaign ? (
+                    <button type="button" className="history-campaign-link" onClick={() => onOpenCampaign(campaign.id)}>
+                      Перейти в кампанию: {campaign.name}
+                    </button>
+                  ) : (
+                    <span className="history-campaign-link muted">Входящий звонок вне кампании</span>
+                  )}
+                </div>
+              </article>
+            );
+          })}
+          {!history.calls.length ? <EmptyBlock title="Истории пока нет" text="По этому номеру еще не найдено входящих или исходящих звонков." /> : null}
+        </div>
       </section>
     </div>
   );
@@ -890,7 +1101,8 @@ export function App() {
   const [selectedCampaign, setSelectedCampaign] = useState<CampaignDetail | null>(null);
   const [selectedContact, setSelectedContact] = useState<Contact | null>(null);
   const [selectedCall, setSelectedCall] = useState<Call | null>(null);
-  const [detailTab, setDetailTab] = useState<DetailTab>("contacts");
+  const [selectedHistory, setSelectedHistory] = useState<ContactHistory | null>(null);
+  const [detailTab, setDetailTab] = useState<DetailTab>("calls");
   const [calls, setCalls] = useState<Call[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
@@ -950,11 +1162,44 @@ export function App() {
     setSelectedCampaignId(id);
     setSelectedContact(null);
     setSelectedCall(null);
-    setDetailTab("contacts");
+    setSelectedHistory(null);
+    setDetailTab("calls");
     try {
       setSelectedCampaign(await api.campaign(id));
     } catch (err) {
       setError(err instanceof Error ? err.message : "Не удалось открыть кампанию");
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  async function openContactHistory(phone: string, name: string) {
+    const normalizedPhone = normalizePhoneForCompare(phone);
+    if (!normalizedPhone) {
+      setError("У контакта нет номера для поиска истории.");
+      return;
+    }
+
+    setLoading(true);
+    setError("");
+    try {
+      const historyCalls = await api.callHistory(normalizedPhone, 100);
+      const localCalls = [
+        ...(selectedCampaign?.calls || []),
+        ...calls,
+      ].filter((call) => sameCallPhone(call, normalizedPhone));
+      const byId = new Map<number, Call>();
+      [...historyCalls, ...localCalls].forEach((call) => byId.set(call.id, call));
+      const mergedCalls = Array.from(byId.values()).sort((a, b) => {
+        const aTime = new Date(callDateValue(a) || 0).getTime();
+        const bTime = new Date(callDateValue(b) || 0).getTime();
+        return bTime - aTime || b.id - a.id;
+      });
+      setSelectedCall(null);
+      setSelectedContact(null);
+      setSelectedHistory({ phone: normalizedPhone, name, calls: mergedCalls });
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Не удалось загрузить историю клиента");
     } finally {
       setLoading(false);
     }
@@ -1015,6 +1260,7 @@ export function App() {
     setSelectedCampaignId(null);
     setSelectedContact(null);
     setSelectedCall(null);
+    setSelectedHistory(null);
     setCalls([]);
   }
 
@@ -1037,9 +1283,22 @@ export function App() {
       />
 
       {selectedCallFromList ? (
-        <CallDetail call={selectedCallFromList} onBack={() => setSelectedCall(null)} />
+        <CallDetail call={selectedCallFromList} onBack={() => setSelectedCall(null)} onOpenHistory={(phone, name) => void openContactHistory(phone, name)} />
+      ) : selectedHistory ? (
+        <ContactHistoryPage
+          history={selectedHistory}
+          campaigns={campaigns}
+          onBack={() => setSelectedHistory(null)}
+          onOpenCall={setSelectedCall}
+          onOpenCampaign={(id) => void openCampaign(id)}
+        />
       ) : selectedContact ? (
-        <ContactDetail contact={selectedContact} onBack={() => setSelectedContact(null)} onSaved={() => void refresh(selectedCampaignId)} />
+        <ContactDetail
+          contact={selectedContact}
+          onBack={() => setSelectedContact(null)}
+          onSaved={() => void refresh(selectedCampaignId)}
+          onOpenHistory={(phone, name) => void openContactHistory(phone, name)}
+        />
       ) : selectedCampaign ? (
         <CampaignPage
           detail={selectedCampaign}
@@ -1062,7 +1321,10 @@ export function App() {
           calls={calls}
           loading={loading}
           onOpenCampaign={(id) => void openCampaign(id)}
-          onOpenCall={setSelectedCall}
+          onOpenCall={(call) => {
+            setSelectedHistory(null);
+            setSelectedCall(call);
+          }}
         />
       )}
     </main>

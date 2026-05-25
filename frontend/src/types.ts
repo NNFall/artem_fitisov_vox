@@ -57,6 +57,9 @@ export type Call = {
   session_id: string;
   campaign_id?: number | null;
   outbound_task_id?: number | null;
+  project?: string | null;
+  script_name?: string | null;
+  model?: string | null;
   client_phone?: string | null;
   caller_phone?: string | null;
   client_name?: string | null;
@@ -71,6 +74,8 @@ export type Call = {
   recording_download_url?: string | null;
   updated_at?: string | null;
   started_at?: string | null;
+  connected_at?: string | null;
+  finished_at?: string | null;
 };
 
 export type Dashboard = {
