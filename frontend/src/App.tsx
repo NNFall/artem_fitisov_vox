@@ -1,101 +1,121 @@
-import { FormEvent, useEffect, useMemo, useRef, useState } from "react";
+import { ChangeEvent, FormEvent, useEffect, useMemo, useRef, useState } from "react";
+import {
+  Activity,
+  AlertCircle,
+  ArrowLeft,
+  BarChart3,
+  CheckCircle2,
+  Clock3,
+  ExternalLink,
+  FileSpreadsheet,
+  Headphones,
+  LogOut,
+  Pause,
+  Phone,
+  Play,
+  RefreshCw,
+  RotateCcw,
+  Save,
+  Search,
+  Upload,
+  UserRound,
+  UsersRound,
+  X,
+} from "lucide-react";
 import { API_BASE, api } from "./api";
-import type { Call, Campaign, CampaignDetail, Contact, Dashboard, ImportResult } from "./types";
+import type { Call, Campaign, CampaignDetail, Contact, Dashboard, ImportResult, Task } from "./types";
 
-type Tab = "dashboard" | "campaigns" | "calls";
+type DetailTab = "contacts" | "tasks" | "calls" | "events";
 type CampaignAction = "run" | "pause" | "rerun";
-type GlyphName =
-  | "brand"
-  | "dashboard"
-  | "campaigns"
-  | "calls"
-  | "contacts"
-  | "queue"
-  | "done"
-  | "error"
-  | "upload"
-  | "worker"
-  | "refresh"
-  | "logout"
-  | "alert"
-  | "search"
-  | "play"
-  | "pause"
-  | "redo"
-  | "clock"
-  | "save"
-  | "close"
-  | "wave"
-  | "arrow"
-  | "skipBack"
-  | "skipForward";
 
 const statusLabels: Record<string, string> = {
-  active: "запущена",
-  paused: "на паузе",
-  pending: "ожидает",
-  scheduled: "запланирована",
-  starting: "запускается",
-  started: "сценарий запущен",
-  in_progress: "идёт звонок",
-  completed: "завершено",
-  failed: "ошибка",
-  finalized: "завершено",
-  call_timeout: "не взяли трубку",
-  call_failed: "звонок не состоялся",
-  call_disconnected: "звонок завершён",
-  dial_error: "ошибка набора",
-  empty_call_target: "нет номера",
-  no_gemini_key: "нет ключа AI",
-  gemini_create_error: "ошибка подключения AI",
-  recording_ready: "запись готова",
-  recording_failed: "ошибка записи",
-  download_error: "запись не скачалась",
-  started_no_url: "запись началась",
-  requested_not_confirmed: "запись запрошена",
-  max_call_duration: "лимит времени",
-  websocket_close: "соединение закрыто",
-  client_hangup: "клиент завершил",
-  hangup: "звонок завершён",
-  ready: "готово к обзвону",
-  not_started: "ещё не запускали",
-  queued: "в очереди",
-  retry_wait: "ожидает повтора",
-  cancelled: "отменено",
+  active: "Активна",
+  paused: "На паузе",
+  pending: "Ожидает",
+  scheduled: "Запланирована",
+  starting: "Запускается",
+  started: "Сценарий запущен",
+  in_progress: "Разговор идет",
+  completed: "Завершено",
+  failed: "Ошибка",
+  finalized: "Финализировано",
+  call_timeout: "Не взяли трубку",
+  call_failed: "Звонок не состоялся",
+  call_disconnected: "Звонок завершен",
+  dial_error: "Ошибка набора",
+  empty_call_target: "Нет номера",
+  no_gemini_key: "Нет ключа AI",
+  gemini_create_error: "Ошибка подключения AI",
+  recording_ready: "Запись готова",
+  ready: "Запись готова",
+  recording_failed: "Ошибка записи",
+  not_started: "Запись не создавалась",
+  download_error: "Запись не скачалась",
+  requested_not_confirmed: "Запись запрошена",
+  max_call_duration: "Лимит времени",
+  websocket_close: "Соединение закрыто",
+  client_hangup: "Клиент завершил",
+  hangup: "Звонок завершен",
+  queued: "В очереди",
+  retry_wait: "Ожидает повтор",
+  cancelled: "Отменено",
+  ok: "Успешно",
+  error: "Ошибка",
+  attended: "Пришел",
+  not_attended: "Не пришел",
+  arrived: "Пришел",
+  no_show: "Не пришел",
+  yes: "Да",
+  no: "Нет",
 };
 
-const navItems: Array<{ tab: Tab; label: string; icon: GlyphName }> = [
-  { tab: "dashboard", label: "Обзор", icon: "dashboard" },
-  { tab: "campaigns", label: "Кампании", icon: "campaigns" },
-  { tab: "calls", label: "Звонки", icon: "calls" },
+const detailTabs: Array<{ id: DetailTab; label: string; icon: typeof UserRound }> = [
+  { id: "contacts", label: "Контакты", icon: UserRound },
+  { id: "tasks", label: "Задачи", icon: FileSpreadsheet },
+  { id: "calls", label: "Звонки", icon: Phone },
+  { id: "events", label: "События", icon: Clock3 },
 ];
 
 function statusRu(value?: string | null) {
-  if (!value) return "не указано";
+  if (!value) return "Не указано";
   return statusLabels[value] || value;
 }
 
 function statusTone(value?: string | null) {
-  if (value === "active" || value === "completed" || value === "finalized" || value === "call_disconnected" || value === "hangup" || value === "client_hangup") return "good";
-  if (value === "failed" || value === "call_failed" || value === "call_timeout" || value === "dial_error" || value === "max_call_duration") return "bad";
-  if (value === "started" || value === "starting" || value === "in_progress" || value === "queued" || value === "scheduled" || value === "retry_wait") return "busy";
+  if (["active", "completed", "finalized", "call_disconnected", "hangup", "client_hangup", "ok", "recording_ready", "ready", "attended", "arrived", "yes"].includes(value || "")) return "good";
+  if (["failed", "call_failed", "call_timeout", "dial_error", "max_call_duration", "error", "recording_failed", "download_error", "not_attended", "no_show", "no"].includes(value || "")) return "bad";
+  if (["started", "starting", "in_progress", "queued", "scheduled", "retry_wait"].includes(value || "")) return "busy";
   return "muted";
 }
 
+function compactText(value?: string | null, fallback = "Нет данных") {
+  const text = String(value || "").trim();
+  if (text.toLowerCase() === "не указано") return "Не указано";
+  return text || fallback;
+}
+
 function formatDate(value?: string | null) {
-  if (!value) return "нет данных";
+  if (!value) return "Не указано";
   const date = new Date(value);
   if (Number.isNaN(date.getTime())) return value;
   return new Intl.DateTimeFormat("ru-RU", {
     day: "2-digit",
     month: "2-digit",
+    year: "2-digit",
     hour: "2-digit",
     minute: "2-digit",
   }).format(date);
 }
 
+function formatDuration(seconds?: number | null) {
+  const value = Math.max(0, Number(seconds || 0));
+  const minutes = Math.floor(value / 60);
+  const rest = Math.floor(value % 60);
+  return `${String(minutes).padStart(2, "0")}:${String(rest).padStart(2, "0")}`;
+}
+
 function formatDelay(seconds?: number | null) {
-  const value = Number(seconds || 0);
+  const value = Math.max(0, Number(seconds || 0));
   if (value >= 60 && value % 60 === 0) return `${value / 60} мин`;
   return `${value} сек`;
 }
@@ -113,16 +133,32 @@ function formatCount(value: number, one: string, few: string, many: string) {
   return `${value} ${pluralRu(value, one, few, many)}`;
 }
 
-function formatDuration(seconds?: number | null) {
-  const value = Number(seconds || 0);
-  const minutes = Math.floor(value / 60);
-  const rest = value % 60;
-  return `${String(minutes).padStart(2, "0")}:${String(rest).padStart(2, "0")}`;
+function stat(campaign: Campaign | null | undefined, keys: string[]) {
+  const stats = campaign?.stats || {};
+  return keys.reduce((sum, key) => sum + Number(stats[key] || 0), 0);
 }
 
-function compactText(value?: string | null, fallback = "нет данных") {
-  const text = String(value || "").trim();
-  return text || fallback;
+function campaignTotal(campaign: Campaign | null | undefined) {
+  return stat(campaign, ["total"]);
+}
+
+function campaignProgress(campaign: Campaign | null | undefined) {
+  const total = campaignTotal(campaign);
+  if (!total) return 0;
+  return Math.round((stat(campaign, ["completed"]) / total) * 100);
+}
+
+function recordingSource(call: Call) {
+  if (call.recording_download_url) {
+    return /^https?:\/\//i.test(call.recording_download_url)
+      ? call.recording_download_url
+      : `${API_BASE}${call.recording_download_url}`;
+  }
+  return "";
+}
+
+function recordingExternalUrl(call: Call) {
+  return call.recording_url && /^https?:\/\//i.test(call.recording_url) ? call.recording_url : "";
 }
 
 function callName(call: Call) {
@@ -130,15 +166,11 @@ function callName(call: Call) {
 }
 
 function callPhone(call: Call) {
-  return compactText(call.client_phone || call.caller_phone, "телефон не указан");
+  return compactText(call.client_phone || call.caller_phone, "Телефон не указан");
 }
 
-function callShortResult(call: Call) {
-  return compactText(call.summary || call.outcome || call.next_step, "результат пока не заполнен");
-}
-
-function recordingSource(call: Call) {
-  return call.recording_download_url ? `${API_BASE}${call.recording_download_url}` : "";
+function callSummary(call: Call) {
+  return compactText(call.summary || call.outcome || call.next_step, "Итог пока не заполнен");
 }
 
 function splitFacts(text?: string | null) {
@@ -150,315 +182,14 @@ function splitFacts(text?: string | null) {
     .slice(0, 5);
 }
 
-function extractRating(text?: string | null) {
-  const match = String(text || "").match(/(\d{1,2})\s*(?:из|\/)\s*10/i);
-  if (!match) return "";
-  const value = Math.max(0, Math.min(10, Number(match[1])));
-  return `${value} из 10`;
+function eventValue(event: Record<string, unknown>, key: string) {
+  const value = event[key];
+  return value === undefined || value === null ? "" : String(value);
 }
 
-function callHumanReason(call: Call) {
-  const status = statusRu(call.status);
-  if (status === "не указано") return "звонок обработан без отдельной причины";
-  return status;
-}
-
-function Glyph({ name, size = 18, className = "" }: { name: GlyphName; size?: number; className?: string }) {
-  const glyphClassName = ["glyph", className].filter(Boolean).join(" ");
-  const common = {
-    className: glyphClassName,
-    width: size,
-    height: size,
-    viewBox: "0 0 24 24",
-    fill: "none",
-    xmlns: "http://www.w3.org/2000/svg",
-    "aria-hidden": true,
-  };
-  const stroke = {
-    stroke: "currentColor",
-    strokeWidth: 1.8,
-    strokeLinecap: "round" as const,
-    strokeLinejoin: "round" as const,
-  };
-
-  if (name === "brand") {
-    return (
-      <svg {...common}>
-        <path d="M5.5 15.5v-4.2C5.5 7.8 8.2 5 12 5s6.5 2.8 6.5 6.3v4.2" {...stroke} />
-        <path d="M7.8 14.2h2.4v5H7.8c-1.1 0-1.8-.7-1.8-1.8v-1.4c0-1.1.7-1.8 1.8-1.8Z" {...stroke} />
-        <path d="M16.2 14.2h-2.4v5h2.4c1.1 0 1.8-.7 1.8-1.8v-1.4c0-1.1-.7-1.8-1.8-1.8Z" {...stroke} />
-        <path d="M10 9.8c1.6-1 2.8-1 4 0" {...stroke} />
-      </svg>
-    );
-  }
-
-  if (name === "dashboard") {
-    return (
-      <svg {...common}>
-        <path d="M4.5 6.5h5v5h-5v-5ZM14.5 5h5v8h-5V5ZM4.5 15h5v3.5h-5V15ZM14.5 16h5v2.5h-5V16Z" {...stroke} />
-        <path d="M7 9h.1M17 9h.1M7 17h.1M17 17h.1" {...stroke} />
-      </svg>
-    );
-  }
-
-  if (name === "campaigns") {
-    return (
-      <svg {...common}>
-        <path d="M6 6.5h9.5c2 0 3.5 1.5 3.5 3.5v7.5H8.5c-2 0-3.5-1.5-3.5-3.5V6.5Z" {...stroke} />
-        <path d="M8.5 10h6.8M8.5 13.5h4.6M17.5 17.5 20 20" {...stroke} />
-      </svg>
-    );
-  }
-
-  if (name === "calls") {
-    return (
-      <svg {...common}>
-        <path d="M7.2 5.2 10 8l-1.7 2c.9 1.9 2.3 3.3 4.2 4.2l2-1.7 2.8 2.8-1.1 2.8c-.3.8-1.1 1.2-2 1-5.2-1.1-9.4-5.3-10.5-10.5-.2-.9.2-1.7 1-2l2.5-1.4Z" {...stroke} />
-        <path d="M15.5 5.5c1.8.5 3 1.8 3.5 3.5M14.6 8.4c.9.3 1.5.9 1.8 1.8" {...stroke} />
-      </svg>
-    );
-  }
-
-  if (name === "contacts") {
-    return (
-      <svg {...common}>
-        <path d="M8.5 12.2c-1.7 0-3-1.4-3-3s1.3-3 3-3 3 1.4 3 3-1.3 3-3 3Z" {...stroke} />
-        <path d="M3.8 19c.5-2.8 2.1-4.2 4.7-4.2s4.2 1.4 4.7 4.2" {...stroke} />
-        <path d="M15.2 7h4.8M15.2 11h4.8M15.2 15h3.2" {...stroke} />
-      </svg>
-    );
-  }
-
-  if (name === "queue") {
-    return (
-      <svg {...common}>
-        <path d="M5 7h8M5 12h6M5 17h9" {...stroke} />
-        <path d="M17 7h2M15 12h4M17 17h2" {...stroke} />
-        <path d="M19 7v10" {...stroke} />
-      </svg>
-    );
-  }
-
-  if (name === "done") {
-    return (
-      <svg {...common}>
-        <path d="M12 20c4.4 0 8-3.6 8-8s-3.6-8-8-8-8 3.6-8 8 3.6 8 8 8Z" {...stroke} />
-        <path d="m8.3 12.2 2.2 2.2 5-5" {...stroke} />
-      </svg>
-    );
-  }
-
-  if (name === "error") {
-    return (
-      <svg {...common}>
-        <path d="M12 4.5 20 18H4l8-13.5Z" {...stroke} />
-        <path d="M12 9v4M12 16.6h.1" {...stroke} />
-      </svg>
-    );
-  }
-
-  if (name === "upload") {
-    return (
-      <svg {...common}>
-        <path d="M5 15.5v1.2c0 1.5 1.1 2.8 2.6 2.8h8.8c1.5 0 2.6-1.3 2.6-2.8v-1.2" {...stroke} />
-        <path d="M12 15V5M8.4 8.6 12 5l3.6 3.6" {...stroke} />
-        <path d="M8 12.5h8" {...stroke} />
-      </svg>
-    );
-  }
-
-  if (name === "refresh") {
-    return (
-      <svg {...common}>
-        <path d="M18.5 9.2c-.9-2.4-3.3-4.1-6.1-4.1-3.1 0-5.8 2.1-6.4 5" {...stroke} />
-        <path d="M18.8 5.8v3.7h-3.7M5.5 14.8c.9 2.4 3.3 4.1 6.1 4.1 3.1 0 5.8-2.1 6.4-5" {...stroke} />
-        <path d="M5.2 18.2v-3.7h3.7" {...stroke} />
-      </svg>
-    );
-  }
-
-  if (name === "logout") {
-    return (
-      <svg {...common}>
-        <path d="M10.5 5.5H6.8c-1.2 0-2 .8-2 2v9c0 1.2.8 2 2 2h3.7" {...stroke} />
-        <path d="M12.8 12h6M16.6 8.7 20 12l-3.4 3.3" {...stroke} />
-      </svg>
-    );
-  }
-
-  if (name === "alert") {
-    return (
-      <svg {...common}>
-        <path d="M8.2 4.8h7.6l3.4 3.4v7.6l-3.4 3.4H8.2l-3.4-3.4V8.2l3.4-3.4Z" {...stroke} />
-        <path d="M12 8.2v5M12 16.8h.1" {...stroke} />
-      </svg>
-    );
-  }
-
-  if (name === "search") {
-    return (
-      <svg {...common}>
-        <path d="M10.8 17.1a6.3 6.3 0 1 0 0-12.6 6.3 6.3 0 0 0 0 12.6Z" {...stroke} />
-        <path d="m15.6 15.6 3.9 3.9" {...stroke} />
-      </svg>
-    );
-  }
-
-  if (name === "play") {
-    return (
-      <svg {...common}>
-        <path d="M8 5.8v12.4l10-6.2L8 5.8Z" {...stroke} />
-      </svg>
-    );
-  }
-
-  if (name === "pause") {
-    return (
-      <svg {...common}>
-        <path d="M8.4 5.5v13M15.6 5.5v13" {...stroke} />
-      </svg>
-    );
-  }
-
-  if (name === "redo") {
-    return (
-      <svg {...common}>
-        <path d="M17.8 8.4c-1.3-2-3.4-3.2-5.9-3.2-3.9 0-7 3.1-7 7s3.1 7 7 7c2.3 0 4.4-1.1 5.7-2.8" {...stroke} />
-        <path d="M18.2 4.8v3.9h-3.9" {...stroke} />
-      </svg>
-    );
-  }
-
-  if (name === "clock") {
-    return (
-      <svg {...common}>
-        <path d="M12 20a8 8 0 1 0 0-16 8 8 0 0 0 0 16Z" {...stroke} />
-        <path d="M12 8v4.4l3 1.8" {...stroke} />
-      </svg>
-    );
-  }
-
-  if (name === "save") {
-    return (
-      <svg {...common}>
-        <path d="M5.5 5.5h11.2l1.8 1.8v11.2h-13V5.5Z" {...stroke} />
-        <path d="M8.5 5.5v5h6v-5M8.3 18.5v-5h7.4v5" {...stroke} />
-      </svg>
-    );
-  }
-
-  if (name === "close") {
-    return (
-      <svg {...common}>
-        <path d="m7.2 7.2 9.6 9.6M16.8 7.2l-9.6 9.6" {...stroke} />
-      </svg>
-    );
-  }
-
-  if (name === "wave") {
-    return (
-      <svg {...common}>
-        <path d="M4.5 13.5v-3M8.2 16.5v-9M11.9 18.2V5.8M15.6 15.8V8.2M19.3 13.7v-3.4" {...stroke} />
-      </svg>
-    );
-  }
-
-  if (name === "arrow") {
-    return (
-      <svg {...common}>
-        <path d="M5 12h13M13.8 7.2 18.5 12l-4.7 4.8" {...stroke} />
-      </svg>
-    );
-  }
-
-  if (name === "skipBack") {
-    return (
-      <svg {...common}>
-        <path d="M11 7 6 12l5 5M18 7l-5 5 5 5" {...stroke} />
-        <path d="M6 12h12" {...stroke} />
-      </svg>
-    );
-  }
-
-  if (name === "skipForward") {
-    return (
-      <svg {...common}>
-        <path d="m13 7 5 5-5 5M6 7l5 5-5 5" {...stroke} />
-        <path d="M6 12h12" {...stroke} />
-      </svg>
-    );
-  }
-
-  return (
-    <svg {...common}>
-      <path d="M5 6.5h14v11H5z" {...stroke} />
-      <path d="M8 10h8M8 14h5" {...stroke} />
-    </svg>
-  );
-}
-
-function campaignProgress(campaign: Campaign) {
-  const stats = campaign.stats || {};
-  const total = stats.total || 0;
-  const completed = stats.completed || 0;
-  const failed = stats.failed || 0;
-  if (!total) return "контактов нет";
-  return `${completed}/${total} завершено · ошибок ${failed}`;
-}
-
-function AppHeader({
-  activeTab,
-  onTab,
-  onLogout,
-  onRefresh,
-  loading,
-}: {
-  activeTab: Tab;
-  onTab: (tab: Tab) => void;
-  onLogout: () => void;
-  onRefresh: () => void;
-  loading: boolean;
-}) {
-  return (
-    <aside className="sidebar">
-      <div className="brand">
-        <div className="brand-mark">
-          <Glyph name="brand" size={22} />
-        </div>
-        <div>
-          <strong>Обзвон AI</strong>
-          <span>Amix / Just Wood</span>
-        </div>
-      </div>
-
-      <nav className="nav-list">
-        {navItems.map((item) => {
-          return (
-            <button
-              type="button"
-              key={item.tab}
-              className={`nav-item ${activeTab === item.tab ? "active" : ""}`}
-              onClick={() => onTab(item.tab)}
-            >
-              <Glyph name={item.icon} />
-              <span>{item.label}</span>
-            </button>
-          );
-        })}
-      </nav>
-
-      <div className="sidebar-footer">
-        <button type="button" className="ghost-button" onClick={onRefresh} disabled={loading}>
-          <Glyph name="refresh" size={17} className={loading ? "spin" : ""} />
-          <span>{loading ? "Обновляю" : "Обновить"}</span>
-        </button>
-        <button type="button" className="ghost-button danger" onClick={onLogout}>
-          <Glyph name="logout" size={17} />
-          <span>Выйти</span>
-        </button>
-      </div>
-    </aside>
-  );
+function shortId(value?: string | number | null) {
+  const text = String(value || "");
+  return text.length > 22 ? `${text.slice(0, 12)}...${text.slice(-6)}` : text;
 }
 
 function LoginView({ onLogin }: { onLogin: () => void }) {
@@ -482,70 +213,37 @@ function LoginView({ onLogin }: { onLogin: () => void }) {
   }
 
   return (
-    <main className="login-screen">
-      <section className="login-stage">
-        <div className="login-story">
-          <div className="login-brand">
-            <div className="login-badge">
-              <Glyph name="brand" size={24} />
-            </div>
+    <main className="auth-screen">
+      <section className="auth-card">
+        <div className="auth-copy">
+          <div className="brand-lockup">
+            <span className="brand-mark"><Headphones size={24} /></span>
             <span>Обзвон AI</span>
           </div>
           <div>
-            <p className="login-kicker">Личный контур Amix</p>
-            <h1>Панель, где звонок сразу превращается в результат</h1>
-            <p>
-              Кампании, контакты, записи разговоров и краткие итоги собраны в одном рабочем экране.
-            </p>
+            <p className="eyebrow">Закрытый контур</p>
+            <h1>Панель управления обзвоном</h1>
+            <p>Кампании, очереди, записи разговоров и итоги звонков в одном рабочем интерфейсе.</p>
           </div>
-          <div className="login-signal" aria-hidden="true">
-            {Array.from({ length: 34 }).map((_, index) => (
-              <span
-                key={index}
-                style={{
-                  ["--bar" as string]: `${22 + ((index * 19) % 62)}%`,
-                  ["--i" as string]: index,
-                }}
-              />
-            ))}
-          </div>
-          <div className="login-proof">
-            <span>сервер 8002</span>
-            <span>записи</span>
-            <span>статусы</span>
-          </div>
+          <AudioBars />
         </div>
 
-        <form className="login-panel" onSubmit={submit}>
+        <form className="auth-form" onSubmit={submit}>
           <div>
-            <p className="form-kicker">Доступ администратора</p>
+            <p className="eyebrow">Доступ администратора</p>
             <h2>Войти в панель</h2>
           </div>
-
           <label className="field">
             <span>Логин</span>
             <input value={username} onChange={(event) => setUsername(event.target.value)} autoComplete="username" />
           </label>
-
           <label className="field">
             <span>Пароль</span>
-            <input
-              type="password"
-              value={password}
-              onChange={(event) => setPassword(event.target.value)}
-              autoComplete="current-password"
-            />
+            <input type="password" value={password} onChange={(event) => setPassword(event.target.value)} autoComplete="current-password" />
           </label>
-
-          {error ? (
-            <div className="inline-error">
-              <Glyph name="alert" size={16} />
-              <span>{error}</span>
-            </div>
-          ) : null}
-
-          <button type="submit" className="primary-button wide login-submit" disabled={loading}>
-            {loading ? <Glyph name="refresh" size={17} className="spin" /> : <Glyph name="arrow" size={17} />}
+          {error ? <InlineMessage tone="bad" icon={<AlertCircle size={17} />} text={error} /> : null}
+          <button type="submit" className="action-button primary wide" disabled={loading}>
+            {loading ? <RefreshCw size={18} className="spin" /> : <ArrowLeft size={18} className="turn-right" />}
             <span>{loading ? "Проверяю" : "Открыть панель"}</span>
           </button>
         </form>
@@ -554,573 +252,32 @@ function LoginView({ onLogin }: { onLogin: () => void }) {
   );
 }
 
-function Metric({ label, value, icon, tone = "neutral", detail }: { label: string; value: string | number; icon: GlyphName; tone?: string; detail?: string }) {
+function AudioBars({ active = true }: { active?: boolean }) {
   return (
-    <section className={`metric ${tone}`}>
-      <div className="metric-icon">
-        <Glyph name={icon} size={20} />
-      </div>
-      <div>
-        <span>{label}</span>
-        <strong>{value}</strong>
-        {detail ? <small>{detail}</small> : null}
-      </div>
-    </section>
-  );
-}
-
-function DashboardView({
-  dashboard,
-  onOpenCampaign,
-  onOpenCall,
-}: {
-  dashboard: Dashboard | null;
-  onOpenCampaign: (id: number) => void;
-  onOpenCall: (call: Call) => void;
-}) {
-  if (!dashboard) return <Skeleton title="Загружаю обзор" />;
-  const failedCalls = dashboard.calls.recent.filter((call) => statusTone(call.status) === "bad").slice(0, 3);
-  const runningCampaigns = dashboard.campaigns.recent.filter((campaign) => campaign.status === "active").length;
-
-  return (
-    <div className="view-stack">
-      <div className="page-heading">
-        <div>
-          <p>Рабочее состояние</p>
-          <h1>Обзор системы</h1>
-        </div>
-        <div className="heading-actions">
-          <span className={`status-pill ${dashboard.worker.enabled ? "good" : "muted"}`}>
-            Обработчик {dashboard.worker.enabled ? "включён" : "выключен"}
-          </span>
-          <span className="soft-code">порт 8002</span>
-        </div>
-      </div>
-
-      <div className="metrics-grid">
-        <Metric label="Кампаний" value={dashboard.campaigns.total} icon="campaigns" detail={`${runningCampaigns} запущено`} />
-        <Metric label="Контактов" value={dashboard.contacts.total} icon="contacts" detail="в web-базе" />
-        <Metric label="В очереди" value={dashboard.tasks.pending} icon="queue" tone="busy" detail={`${dashboard.tasks.active} в работе`} />
-        <Metric label="Завершено" value={dashboard.tasks.completed} icon="done" tone="good" detail="по задачам" />
-        <Metric label="Ошибок" value={dashboard.tasks.failed} icon="error" tone="bad" detail="требуют проверки" />
-      </div>
-
-      <section className="ops-ribbon">
-        <div>
-          <span>Текущая очередь</span>
-          <strong>{dashboard.tasks.pending ? `${dashboard.tasks.pending} ожидают запуска` : "нет ожидающих задач"}</strong>
-        </div>
-        <div>
-          <span>Параллельность</span>
-          <strong>{dashboard.worker.max_concurrent_calls} звонок за раз</strong>
-        </div>
-        <div>
-          <span>Проверка очереди</span>
-          <strong>каждые {dashboard.worker.queue_interval_seconds} сек</strong>
-        </div>
-        <div>
-          <span>Последний риск</span>
-          <strong>{failedCalls[0] ? `${compactText(failedCalls[0].client_name, "Без имени")}: ${statusRu(failedCalls[0].status)}` : "критичных нет"}</strong>
-        </div>
-      </section>
-
-      <div className="two-column">
-        <section className="panel">
-          <div className="panel-title">
-            <h2>Последние кампании</h2>
-            <span>{dashboard.campaigns.recent.length}</span>
-          </div>
-          <div className="list-table">
-            {dashboard.campaigns.recent.map((campaign) => (
-              <button type="button" className="list-row" key={campaign.id} onClick={() => onOpenCampaign(campaign.id)}>
-                <span>
-                  <strong>#{campaign.id} {campaign.name}</strong>
-                  <small>{campaignProgress(campaign)} · пауза {formatDelay(campaign.call_delay_seconds)} · {formatDate(campaign.updated_at)}</small>
-                </span>
-                <span className={`status-pill ${statusTone(campaign.status)}`}>{statusRu(campaign.status)}</span>
-              </button>
-            ))}
-            {!dashboard.campaigns.recent.length ? <EmptyText text="Кампаний пока нет" /> : null}
-          </div>
-        </section>
-
-        <section className="panel">
-          <div className="panel-title">
-            <h2>Последние звонки</h2>
-            <span>{dashboard.calls.total}</span>
-          </div>
-          <div className="list-table">
-            {dashboard.calls.recent.map((call) => (
-              <button type="button" className="list-row call-row" key={call.id} onClick={() => onOpenCall(call)}>
-                <span>
-                  <strong>{callName(call)}</strong>
-                  <small>{callPhone(call)} · {formatDuration(call.duration)} · {formatDate(call.updated_at)}</small>
-                </span>
-                <span className={`status-pill ${statusTone(call.status)}`}>{statusRu(call.status)}</span>
-              </button>
-            ))}
-            {!dashboard.calls.recent.length ? <EmptyText text="Звонков пока нет" /> : null}
-          </div>
-        </section>
-      </div>
-    </div>
-  );
-}
-
-function UploadPanel({ onUploaded }: { onUploaded: (result: ImportResult) => void }) {
-  const [file, setFile] = useState<File | null>(null);
-  const [loading, setLoading] = useState(false);
-  const [error, setError] = useState("");
-
-  async function submit(event: FormEvent) {
-    event.preventDefault();
-    if (!file) return;
-    setLoading(true);
-    setError("");
-    try {
-      const result = await api.upload(file);
-      onUploaded(result);
-      setFile(null);
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "Не удалось загрузить файл");
-    } finally {
-      setLoading(false);
-    }
-  }
-
-  return (
-    <form className="upload-panel" onSubmit={submit}>
-      <div>
-        <h2>Загрузить базу</h2>
-        <p>XLSX, CSV или TSV. Кампания создаётся на паузе.</p>
-      </div>
-      <label className="file-drop">
-        <Glyph name="upload" size={20} />
-        <span>{file ? file.name : "Выберите файл"}</span>
-        <input
-          type="file"
-          accept=".xlsx,.csv,.tsv"
-          onChange={(event) => setFile(event.target.files?.[0] || null)}
-        />
-      </label>
-      {error ? <div className="inline-error"><Glyph name="alert" size={16} /><span>{error}</span></div> : null}
-      <button type="submit" className="primary-button" disabled={!file || loading}>
-        {loading ? <Glyph name="refresh" size={17} className="spin" /> : <Glyph name="upload" size={17} />}
-        <span>{loading ? "Загружаю" : "Создать кампанию"}</span>
-      </button>
-    </form>
-  );
-}
-
-function CampaignsView({
-  campaigns,
-  selected,
-  onSelect,
-  onOpenCall,
-  onUploaded,
-  onAction,
-}: {
-  campaigns: Campaign[];
-  selected: CampaignDetail | null;
-  onSelect: (id: number) => void;
-  onOpenCall: (call: Call) => void;
-  onUploaded: (result: ImportResult) => void;
-  onAction: () => void;
-}) {
-  const [query, setQuery] = useState("");
-  const filtered = useMemo(() => {
-    const needle = query.trim().toLowerCase();
-    if (!needle) return campaigns;
-    return campaigns.filter((campaign) => `${campaign.id} ${campaign.name}`.toLowerCase().includes(needle));
-  }, [campaigns, query]);
-
-  useEffect(() => {
-    if (!selected && filtered[0]) {
-      onSelect(filtered[0].id);
-    }
-  }, [filtered, selected]);
-
-  return (
-    <div className="campaign-layout">
-      <section className="panel campaign-list-panel">
-        <UploadPanel onUploaded={onUploaded} />
-        <div className="search-box">
-          <Glyph name="search" size={17} />
-          <input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Поиск кампании" />
-        </div>
-        <div className="campaign-list">
-          {filtered.map((campaign) => (
-            <button
-              type="button"
-              key={campaign.id}
-              className={`campaign-item ${selected?.campaign.id === campaign.id ? "active" : ""}`}
-              onClick={() => onSelect(campaign.id)}
-            >
-              <span>
-                <strong>#{campaign.id} {campaign.name}</strong>
-                <small>{formatCount(campaign.stats?.total || 0, "контакт", "контакта", "контактов")} · {formatDelay(campaign.call_delay_seconds)}</small>
-              </span>
-              <span className={`status-pill ${statusTone(campaign.status)}`}>{statusRu(campaign.status)}</span>
-            </button>
-          ))}
-          {!filtered.length ? <EmptyText text="Ничего не найдено" /> : null}
-        </div>
-      </section>
-
-      {selected ? (
-        <CampaignDetailView detail={selected} onAction={onAction} onOpenCall={onOpenCall} />
-      ) : filtered.length ? (
-        <section className="panel empty-detail loading-detail">
-          <Glyph name="refresh" size={30} className="spin" />
-          <h2>Открываю кампанию</h2>
-          <p>Загружаю контакты, статусы задач и звонки по выбранной базе.</p>
-        </section>
-      ) : (
-        <section className="panel empty-detail">
-          <Glyph name="campaigns" size={30} />
-          <h2>Выберите кампанию</h2>
-          <p>Здесь появятся контакты, статусы задач, звонки и управление запуском.</p>
-        </section>
-      )}
-    </div>
-  );
-}
-
-function CampaignDetailView({
-  detail,
-  onAction,
-  onOpenCall,
-}: {
-  detail: CampaignDetail;
-  onAction: () => void;
-  onOpenCall: (call: Call) => void;
-}) {
-  const [delay, setDelay] = useState(String(detail.campaign.call_delay_seconds || 0));
-  const [savingAction, setSavingAction] = useState("");
-  const [pendingAction, setPendingAction] = useState<CampaignAction | null>(null);
-  const [error, setError] = useState("");
-  const totalContacts = detail.campaign.stats?.total || detail.contacts.length || 0;
-  const waitingContacts = (detail.campaign.stats?.pending || 0) + (detail.campaign.stats?.scheduled || 0);
-  const failedContacts = detail.campaign.stats?.failed || 0;
-  const isRunning = ["active", "starting", "in_progress"].includes(detail.campaign.status);
-  const runDisabled = savingAction !== "" || isRunning || totalContacts === 0;
-  const pauseDisabled = savingAction !== "" || !isRunning;
-  const rerunDisabled = savingAction !== "" || totalContacts === 0;
-  const confirmCopy = pendingAction
-    ? {
-        run: {
-          title: "Запустить обзвон?",
-          text: `Кампания начнёт брать контакты из очереди. Сейчас ожидают ${waitingContacts} ${pluralRu(waitingContacts, "контакт", "контакта", "контактов")}.`,
-          confirm: "Запустить",
-          tone: "primary",
-        },
-        pause: {
-          title: "Поставить кампанию на паузу?",
-          text: "Новые звонки перестанут запускаться. Уже начатый звонок не будет оборван этим действием.",
-          confirm: "Поставить на паузу",
-          tone: "secondary",
-        },
-        rerun: {
-          title: "Подготовить повторный запуск?",
-          text: `Будут сброшены статусы по ${totalContacts} ${pluralRu(totalContacts, "контакту", "контактам", "контактам")}. Ошибок сейчас: ${failedContacts}. После этого кампания останется на паузе.`,
-          confirm: "Сбросить статусы",
-          tone: "danger",
-        },
-      }[pendingAction]
-    : null;
-
-  useEffect(() => {
-    setDelay(String(detail.campaign.call_delay_seconds || 0));
-    setPendingAction(null);
-  }, [detail.campaign.id, detail.campaign.call_delay_seconds]);
-
-  async function runAction(action: CampaignAction) {
-    setSavingAction(action);
-    setError("");
-    try {
-      await api.setCampaignStatus(detail.campaign.id, action);
-      setPendingAction(null);
-      onAction();
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "Не удалось выполнить действие");
-    } finally {
-      setSavingAction("");
-    }
-  }
-
-  async function saveDelay() {
-    setSavingAction("delay");
-    setError("");
-    try {
-      await api.setDelay(detail.campaign.id, Number(delay || 0));
-      onAction();
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "Не удалось сохранить паузу");
-    } finally {
-      setSavingAction("");
-    }
-  }
-
-  return (
-    <section className="panel detail-panel">
-      <div className="detail-header">
-        <div>
-          <p>Кампания #{detail.campaign.id}</p>
-          <h1>{detail.campaign.name}</h1>
-        </div>
-        <span className={`status-pill ${statusTone(detail.campaign.status)}`}>{statusRu(detail.campaign.status)}</span>
-      </div>
-
-      <div className="actions-bar">
-        <button type="button" className="primary-button" onClick={() => setPendingAction("run")} disabled={runDisabled}>
-          {savingAction === "run" ? <Glyph name="refresh" size={16} className="spin" /> : <Glyph name="play" size={16} />}
-          <span>{isRunning ? "Уже запущена" : "Запустить обзвон"}</span>
-        </button>
-        <button type="button" className="secondary-button" onClick={() => setPendingAction("pause")} disabled={pauseDisabled}>
-          <Glyph name="pause" size={16} />
-          <span>Поставить на паузу</span>
-        </button>
-        <button type="button" className="secondary-button" onClick={() => setPendingAction("rerun")} disabled={rerunDisabled}>
-          <Glyph name="redo" size={16} />
-          <span>Повторить по {totalContacts}</span>
-        </button>
-        <label className="delay-control">
-          <Glyph name="clock" size={16} />
-          <span>Пауза, сек</span>
-          <input value={delay} onChange={(event) => setDelay(event.target.value.replace(/\D/g, ""))} />
-          <button type="button" onClick={saveDelay} disabled={savingAction !== ""}>
-            <Glyph name="save" size={15} />
-          </button>
-        </label>
-      </div>
-
-      {confirmCopy && pendingAction ? (
-        <div className={`confirm-sheet ${confirmCopy.tone}`}>
-          <div>
-            <strong>{confirmCopy.title}</strong>
-            <p>{confirmCopy.text}</p>
-          </div>
-          <div className="confirm-actions">
-            <button type="button" className="secondary-button" onClick={() => setPendingAction(null)} disabled={savingAction !== ""}>
-              Отмена
-            </button>
-            <button type="button" className={confirmCopy.tone === "danger" ? "danger-button" : "primary-button"} onClick={() => runAction(pendingAction)} disabled={savingAction !== ""}>
-              {savingAction === pendingAction ? <Glyph name="refresh" size={16} className="spin" /> : null}
-              <span>{confirmCopy.confirm}</span>
-            </button>
-          </div>
-        </div>
-      ) : null}
-
-      {error ? <div className="inline-error"><Glyph name="alert" size={16} /><span>{error}</span></div> : null}
-
-      <div className="stats-strip">
-        <Metric label="Всего" value={detail.campaign.stats?.total || 0} icon="contacts" />
-        <Metric label="Ожидают" value={(detail.campaign.stats?.pending || 0) + (detail.campaign.stats?.scheduled || 0)} icon="queue" tone="busy" />
-        <Metric label="Готово" value={detail.campaign.stats?.completed || 0} icon="done" tone="good" />
-        <Metric label="Ошибки" value={detail.campaign.stats?.failed || 0} icon="error" tone="bad" />
-      </div>
-
-      <ContactTable contacts={detail.contacts} onSaved={onAction} />
-
-      <section className="subsection">
-        <div className="panel-title">
-          <h2>Звонки кампании</h2>
-          <span>{detail.calls.length}</span>
-        </div>
-        <CallsTable calls={detail.calls} compact onSelect={onOpenCall} />
-      </section>
-    </section>
-  );
-}
-
-function ContactTable({ contacts, onSaved }: { contacts: Contact[]; onSaved: () => void }) {
-  return (
-    <section className="subsection">
-      <div className="panel-title">
-        <h2>Контакты</h2>
-        <span>{contacts.length}</span>
-      </div>
-      <div className="data-table contact-table">
-        <div className="table-head">
-          <span>Контакт</span>
-          <span>Компания</span>
-          <span>Контекст</span>
-          <span>Статус</span>
-          <span></span>
-        </div>
-        {contacts.map((contact) => (
-          <EditableContactRow key={contact.id} contact={contact} onSaved={onSaved} />
-        ))}
-        {!contacts.length ? <EmptyText text="Контактов нет" /> : null}
-      </div>
-    </section>
-  );
-}
-
-function EditableContactRow({ contact, onSaved }: { contact: Contact; onSaved: () => void }) {
-  const [editing, setEditing] = useState(false);
-  const [draft, setDraft] = useState({
-    name: contact.name || "",
-    phone: contact.phone || "",
-    company: contact.company || "",
-    context: contact.context || "",
-  });
-  const [saving, setSaving] = useState(false);
-
-  useEffect(() => {
-    setDraft({
-      name: contact.name || "",
-      phone: contact.phone || "",
-      company: contact.company || "",
-      context: contact.context || "",
-    });
-  }, [contact]);
-
-  async function save() {
-    setSaving(true);
-    try {
-      await api.updateContact(contact.id, draft);
-      setEditing(false);
-      onSaved();
-    } finally {
-      setSaving(false);
-    }
-  }
-
-  if (editing) {
-    return (
-      <div className="table-row editing">
-        <span className="edit-stack">
-          <input value={draft.name} onChange={(event) => setDraft({ ...draft, name: event.target.value })} />
-          <input value={draft.phone} onChange={(event) => setDraft({ ...draft, phone: event.target.value })} />
-        </span>
-        <span><input value={draft.company} onChange={(event) => setDraft({ ...draft, company: event.target.value })} /></span>
-        <span><textarea value={draft.context} onChange={(event) => setDraft({ ...draft, context: event.target.value })} /></span>
-        <span className={`status-pill ${statusTone(contact.task?.status)}`}>{statusRu(contact.task?.status)}</span>
-        <span className="row-actions">
-          <button type="button" className="icon-button" onClick={save} disabled={saving} title="Сохранить">
-            {saving ? <Glyph name="refresh" size={15} className="spin" /> : <Glyph name="save" size={15} />}
-          </button>
-          <button type="button" className="icon-button" onClick={() => setEditing(false)} title="Отменить">
-            <Glyph name="close" size={15} />
-          </button>
-        </span>
-      </div>
-    );
-  }
-
-  return (
-    <button type="button" className="table-row as-button" onClick={() => setEditing(true)}>
-      <span>
-        <strong>{compactText(contact.name, "Без имени")}</strong>
-        <small>{contact.phone}</small>
-      </span>
-      <span>{compactText(contact.company)}</span>
-      <span className="muted-text">{compactText(contact.context || contact.activity_type, "контекст не указан")}</span>
-      <span className={`status-pill ${statusTone(contact.task?.status)}`}>{statusRu(contact.task?.status)}</span>
-      <span className="row-hint">Редактировать</span>
-    </button>
-  );
-}
-
-function CallsView({
-  calls,
-  selectedCallId,
-  onSelectCall,
-}: {
-  calls: Call[];
-  selectedCallId: number | null;
-  onSelectCall: (call: Call) => void;
-}) {
-  const selectedCall =
-    calls.find((call) => call.id === selectedCallId) ||
-    calls.find((call) => Boolean(call.recording_download_url)) ||
-    calls[0] ||
-    null;
-
-  return (
-    <div className="calls-workspace">
-      <div className="page-heading">
-        <div>
-          <p>Разбор разговоров</p>
-          <h1>Звонки</h1>
-        </div>
-        <span className="status-pill muted">{formatCount(calls.length, "запись", "записи", "записей")}</span>
-      </div>
-
-      <section className="calls-lane">
-        <CallsTable calls={calls} compact selectedCallId={selectedCall?.id || null} onSelect={onSelectCall} />
-      </section>
-
-      <CallResultPanel call={selectedCall} />
-    </div>
-  );
-}
-
-function CallsTable({
-  calls,
-  compact = false,
-  selectedCallId,
-  onSelect,
-}: {
-  calls: Call[];
-  compact?: boolean;
-  selectedCallId?: number | null;
-  onSelect?: (call: Call) => void;
-}) {
-  return (
-    <div className={`data-table calls-table ${compact ? "compact" : ""}`}>
-      <div className="table-head">
-        <span>Клиент</span>
-        <span>Итог</span>
-        <span>Длительность</span>
-        <span>Запись</span>
-      </div>
-      {calls.map((call) => (
-        <button
-          type="button"
-          className={`table-row call-table-row ${selectedCallId === call.id ? "selected" : ""}`}
-          key={call.id}
-          onClick={() => onSelect?.(call)}
-        >
-          <span>
-            <strong>{callName(call)}</strong>
-            <small>{callPhone(call)} · {formatDate(call.updated_at)}</small>
-          </span>
-          <span>
-            <span className={`status-pill ${statusTone(call.status)}`}>{statusRu(call.status)}</span>
-            <small className="summary-line" title={call.summary || ""}>{callShortResult(call)}</small>
-          </span>
-          <span>{formatDuration(call.duration)}</span>
-          <span>
-            {call.recording_download_url ? (
-              <span className="recording-mini">
-                <Glyph name="wave" size={16} />
-                <span>есть запись</span>
-              </span>
-            ) : (
-              <span className="muted-text">нет файла</span>
-            )}
-          </span>
-        </button>
+    <div className={`audio-bars ${active ? "active" : "idle"}`} aria-hidden="true">
+      {Array.from({ length: 34 }).map((_, index) => (
+        <span key={index} style={{ ["--bar" as string]: `${20 + ((index * 17) % 62)}%`, ["--i" as string]: index }} />
       ))}
-      {!calls.length ? <EmptyText text="Звонков пока нет" /> : null}
     </div>
   );
 }
 
-function AudioPlayer({ src }: { src: string }) {
+function RecordingPlayer({ src }: { src: string }) {
   const audioRef = useRef<HTMLAudioElement | null>(null);
   const [playing, setPlaying] = useState(false);
-  const [current, setCurrent] = useState(0);
+  const [currentTime, setCurrentTime] = useState(0);
   const [duration, setDuration] = useState(0);
-  const [speed, setSpeed] = useState(1);
-  const [playerState, setPlayerState] = useState<"loading" | "ready" | "error">("loading");
+
+  useEffect(() => {
+    setPlaying(false);
+    setCurrentTime(0);
+    setDuration(0);
+  }, [src]);
 
   async function toggle() {
     const audio = audioRef.current;
-    if (!audio || playerState === "error") return;
+    if (!audio) return;
+
     if (audio.paused) {
       await audio.play();
       setPlaying(true);
@@ -1130,95 +287,565 @@ function AudioPlayer({ src }: { src: string }) {
     }
   }
 
-  function seek(value: string) {
+  function seek(event: ChangeEvent<HTMLInputElement>) {
     const audio = audioRef.current;
-    if (!audio) return;
-    const next = Number(value);
-    audio.currentTime = next;
-    setCurrent(next);
-  }
-
-  function jump(delta: number) {
-    const audio = audioRef.current;
-    if (!audio) return;
-    const next = Math.max(0, Math.min(duration || audio.duration || 0, audio.currentTime + delta));
-    audio.currentTime = next;
-    setCurrent(next);
-  }
-
-  function cycleSpeed() {
-    const speeds = [1, 1.25, 1.5, 2];
-    const next = speeds[(speeds.indexOf(speed) + 1) % speeds.length];
-    setSpeed(next);
-    if (audioRef.current) audioRef.current.playbackRate = next;
+    const nextTime = Number(event.target.value);
+    if (audio) audio.currentTime = nextTime;
+    setCurrentTime(nextTime);
   }
 
   return (
-    <div className={`voice-player ${playerState}`}>
-      <audio
-        ref={audioRef}
-        preload="metadata"
-        src={src}
-        onLoadStart={() => setPlayerState("loading")}
-        onLoadedMetadata={(event) => {
-          const audio = event.currentTarget;
-          setDuration(audio.duration || 0);
-          audio.playbackRate = speed;
-          setPlayerState("ready");
-        }}
-        onCanPlay={() => setPlayerState("ready")}
-        onError={() => {
-          setPlayerState("error");
-          setPlaying(false);
-        }}
-        onTimeUpdate={(event) => setCurrent(event.currentTarget.currentTime || 0)}
-        onPause={() => setPlaying(false)}
-        onEnded={() => setPlaying(false)}
-      />
-      <button type="button" className="player-button" onClick={toggle} disabled={playerState === "error"} aria-label={playing ? "Пауза" : "Воспроизвести"}>
-        <Glyph name={playing ? "pause" : "play"} size={18} />
+    <div className="audio-card">
+      <button type="button" className="play-orb" aria-label={playing ? "Поставить запись на паузу" : "Воспроизвести запись"} onClick={toggle}>
+        {playing ? <Pause size={20} /> : <Play size={20} />}
       </button>
       <div className="player-main">
-        <div className="player-meta">
-          <strong>{playerState === "loading" ? "Готовлю запись" : playerState === "error" ? "Запись не открылась" : "Запись готова"}</strong>
-          <span>{playerState === "error" ? "Попробуйте обновить страницу или проверить файл позже." : "Можно слушать и быстро перематывать разговор."}</span>
+        <div className="player-head">
+          <strong>Запись готова</strong>
+          <span>{formatDuration(currentTime)} / {duration ? formatDuration(duration) : "00:00"}</span>
         </div>
-        <div className="wave-strip" aria-hidden="true">
-          {Array.from({ length: 26 }).map((_, index) => (
-            <span
-              key={index}
-              style={{
-                ["--bar" as string]: `${18 + ((index * 17) % 46)}%`,
-                ["--i" as string]: index,
-              }}
-            />
-          ))}
-        </div>
+        <AudioBars active={playing} />
         <input
+          className="player-range"
           type="range"
           min="0"
-          max={Math.max(duration, 1)}
+          max={duration || 0}
           step="0.1"
-          value={Math.min(current, duration || 0)}
-          onChange={(event) => seek(event.target.value)}
+          value={Math.min(currentTime, duration || currentTime)}
+          onChange={seek}
           aria-label="Позиция записи"
-          disabled={playerState === "error"}
         />
-        <div className="player-tools">
-          <button type="button" onClick={() => jump(-15)} disabled={playerState === "error"}>
-            <Glyph name="skipBack" size={15} />
-            <span>15 сек</span>
-          </button>
-          <button type="button" onClick={() => jump(15)} disabled={playerState === "error"}>
-            <span>15 сек</span>
-            <Glyph name="skipForward" size={15} />
-          </button>
-          <button type="button" onClick={cycleSpeed} disabled={playerState === "error"}>
-            {speed}x
+        <audio
+          ref={audioRef}
+          preload="metadata"
+          src={src}
+          onLoadedMetadata={(event) => setDuration(Number.isFinite(event.currentTarget.duration) ? event.currentTarget.duration : 0)}
+          onTimeUpdate={(event) => setCurrentTime(event.currentTarget.currentTime)}
+          onEnded={() => setPlaying(false)}
+        />
+      </div>
+    </div>
+  );
+}
+
+function InlineMessage({ tone, icon, text }: { tone: "good" | "bad" | "busy"; icon: React.ReactNode; text: string }) {
+  return (
+    <div className={`inline-message ${tone}`}>
+      {icon}
+      <span>{text}</span>
+    </div>
+  );
+}
+
+function TopBar({
+  loading,
+  message,
+  error,
+  onRefresh,
+  onLogout,
+  onUpload,
+  onClearMessage,
+}: {
+  loading: boolean;
+  message: string;
+  error: string;
+  onRefresh: () => void;
+  onLogout: () => void;
+  onUpload: (file: File) => void;
+  onClearMessage: () => void;
+}) {
+  const inputRef = useRef<HTMLInputElement | null>(null);
+
+  return (
+    <header className="app-header">
+      <div>
+        <h1>Панель управления обзвоном</h1>
+        <p>Детальный мониторинг и оркестрация</p>
+      </div>
+      <div className="header-actions">
+        <input
+          ref={inputRef}
+          className="visually-hidden"
+          type="file"
+          accept=".xlsx,.xls,.csv,.tsv"
+          onChange={(event) => {
+            const file = event.target.files?.[0];
+            if (file) onUpload(file);
+            event.currentTarget.value = "";
+          }}
+        />
+        <button type="button" className="action-button secondary" onClick={() => inputRef.current?.click()}>
+          <Upload size={17} />
+          <span>Загрузить базу</span>
+        </button>
+        <button type="button" className="action-button secondary" onClick={onRefresh} disabled={loading}>
+          <RefreshCw size={17} className={loading ? "spin" : ""} />
+          <span>{loading ? "Обновляю" : "Обновить"}</span>
+        </button>
+        <button type="button" className="action-button ghost" onClick={onLogout}>
+          <LogOut size={17} />
+          <span>Выйти</span>
+        </button>
+      </div>
+      {message || error ? (
+        <div className={`toast ${error ? "bad" : "good"}`}>
+          {error ? <AlertCircle size={17} /> : <CheckCircle2 size={17} />}
+          <span>{error || message}</span>
+          <button type="button" onClick={onClearMessage} aria-label="Закрыть уведомление">
+            <X size={16} />
           </button>
         </div>
+      ) : null}
+    </header>
+  );
+}
+
+function MetricCard({ label, value, tone = "neutral", detail }: { label: string; value: string | number; tone?: string; detail?: string }) {
+  return (
+    <section className={`metric-card ${tone}`}>
+      <span>{label}</span>
+      <strong>{value}</strong>
+      {detail ? <small>{detail}</small> : null}
+    </section>
+  );
+}
+
+function DashboardPage({
+  dashboard,
+  campaigns,
+  calls,
+  loading,
+  onOpenCampaign,
+  onOpenCall,
+}: {
+  dashboard: Dashboard | null;
+  campaigns: Campaign[];
+  calls: Call[];
+  loading: boolean;
+  onOpenCampaign: (id: number) => void;
+  onOpenCall: (call: Call) => void;
+}) {
+  if (!dashboard && loading) return <LoadingPanel title="Загружаю обзор" />;
+
+  const activeTasks = dashboard ? dashboard.tasks.active : 0;
+  const completed = dashboard ? dashboard.tasks.completed : 0;
+  const failed = dashboard ? dashboard.tasks.failed : 0;
+
+  return (
+    <div className="screen-stack enter">
+      <section className="metrics-grid">
+        <MetricCard label="Всего кампаний" value={dashboard?.campaigns.total ?? campaigns.length} />
+        <MetricCard label="Активные задачи" value={activeTasks} />
+        <MetricCard label="Завершено" value={completed} tone="good" />
+        <MetricCard label="Ошибки" value={failed} tone="bad" />
+      </section>
+
+      <section className="dashboard-grid">
+        <div className="campaigns-panel">
+          <div className="section-head">
+            <h2>Кампании</h2>
+            <span>{formatCount(campaigns.length, "кампания", "кампании", "кампаний")}</span>
+          </div>
+          <div className="campaign-list">
+            {campaigns.map((campaign) => (
+              <button type="button" className="campaign-card" key={campaign.id} onClick={() => onOpenCampaign(campaign.id)}>
+                <span>
+                  <strong>{campaign.name}</strong>
+                  <small>
+                    <i className={`status-dot ${campaign.status === "active" ? "good" : "muted"}`} />
+                    {statusRu(campaign.status)}
+                  </small>
+                </span>
+                <span className="campaign-metrics">
+                  <span>
+                    <small>Прогресс</small>
+                    <b>{campaignProgress(campaign)}%</b>
+                  </span>
+                  <span>
+                    <small>Ошибки</small>
+                    <b className="bad-text">{stat(campaign, ["failed"])}</b>
+                  </span>
+                </span>
+              </button>
+            ))}
+            {!campaigns.length ? <EmptyBlock title="Кампаний пока нет" text="Загрузите XLSX, CSV или TSV-файл, чтобы создать первую кампанию." /> : null}
+          </div>
+        </div>
+
+        <aside className="side-panel">
+          <div className="section-head">
+            <h2>Последние звонки</h2>
+            <span>{dashboard?.calls.total ?? calls.length}</span>
+          </div>
+          <div className="compact-call-list">
+            {calls.slice(0, 5).map((call) => (
+              <button type="button" key={call.id} className="compact-call" onClick={() => onOpenCall(call)}>
+                <span>
+                  <strong>{callName(call)}</strong>
+                  <small>{callPhone(call)}</small>
+                </span>
+                <span className={`status-pill ${statusTone(call.status)}`}>{statusRu(call.status)}</span>
+              </button>
+            ))}
+            {!calls.length ? <EmptyBlock title="Звонков пока нет" text="Когда кампания начнет работать, здесь появятся последние разговоры." compact /> : null}
+          </div>
+        </aside>
+      </section>
+    </div>
+  );
+}
+
+function CampaignPage({
+  detail,
+  tab,
+  loading,
+  onBack,
+  onTab,
+  onAction,
+  onDelay,
+  onOpenCall,
+  onOpenContact,
+}: {
+  detail: CampaignDetail;
+  tab: DetailTab;
+  loading: boolean;
+  onBack: () => void;
+  onTab: (tab: DetailTab) => void;
+  onAction: (action: CampaignAction) => void;
+  onDelay: (seconds: number) => void;
+  onOpenCall: (call: Call) => void;
+  onOpenContact: (contact: Contact) => void;
+}) {
+  const { campaign, contacts, tasks, calls, events } = detail;
+  const [delay, setDelay] = useState(campaign.call_delay_seconds || 0);
+
+  useEffect(() => {
+    setDelay(campaign.call_delay_seconds || 0);
+  }, [campaign.call_delay_seconds]);
+
+  const primaryAction: CampaignAction = campaign.status === "active" ? "pause" : "run";
+  const primaryLabel = campaign.status === "active" ? "Приостановить" : "Запустить";
+  const PrimaryIcon = campaign.status === "active" ? Pause : Play;
+
+  return (
+    <div className="screen-stack enter">
+      <button type="button" className="back-button" onClick={onBack}>
+        <ArrowLeft size={20} />
+        <span>Назад</span>
+      </button>
+
+      <section className="campaign-detail-card">
+        <div className="campaign-detail-head">
+          <div>
+            <h2>{campaign.name}</h2>
+            <p>Файл базы: {compactText(campaign.source_filename, "источник не указан")}</p>
+          </div>
+          <div className="campaign-actions">
+            <button type="button" className="action-button secondary" onClick={() => onAction("rerun")} disabled={loading}>
+              <RotateCcw size={17} />
+              <span>Повторить</span>
+            </button>
+            <button type="button" className="action-button primary" onClick={() => onAction(primaryAction)} disabled={loading}>
+              <PrimaryIcon size={17} />
+              <span>{primaryLabel}</span>
+            </button>
+          </div>
+        </div>
+
+        <div className="detail-metrics">
+          <MetricCard label="Всего задач" value={campaignTotal(campaign)} />
+          <MetricCard label="В очереди" value={stat(campaign, ["pending", "scheduled"])} />
+          <MetricCard label="Завершено" value={stat(campaign, ["completed"])} tone="good" />
+          <MetricCard label="Ошибки" value={stat(campaign, ["failed"])} tone="bad" />
+        </div>
+
+        <div className="campaign-info-grid">
+          <div>
+            <span>Файл базы</span>
+            <strong>{compactText(campaign.source_filename, "Не указан")}</strong>
+            <span>Дата создания</span>
+            <strong>{formatDate(campaign.created_at)}</strong>
+          </div>
+          <div>
+            <span>Статус</span>
+            <strong className={campaign.status === "active" ? "good-text" : "muted-text"}>{statusRu(campaign.status)}</strong>
+            <span>Пауза между звонками</span>
+            <strong>{formatDelay(campaign.call_delay_seconds)}</strong>
+          </div>
+          <div className="delay-card">
+            <label>
+              <span>Изменить паузу, сек</span>
+              <input type="number" min="0" value={delay} onChange={(event) => setDelay(Number(event.target.value))} />
+            </label>
+            <button type="button" className="icon-action" onClick={() => onDelay(delay)} disabled={loading} title="Сохранить паузу">
+              <Save size={17} />
+            </button>
+          </div>
+        </div>
+      </section>
+
+      <section className="detail-tabs-card">
+        <div className="tabs-row">
+          {detailTabs.map((item) => {
+            const Icon = item.icon;
+            return (
+              <button type="button" key={item.id} className={`tab-button ${tab === item.id ? "active" : ""}`} onClick={() => onTab(item.id)}>
+                <Icon size={19} />
+                <span>{item.label}</span>
+              </button>
+            );
+          })}
+        </div>
+        <div className="tab-content">
+          {tab === "contacts" ? <ContactsTable contacts={contacts} onOpen={onOpenContact} /> : null}
+          {tab === "tasks" ? <TasksTable tasks={tasks} /> : null}
+          {tab === "calls" ? <CampaignCalls calls={calls} onOpen={onOpenCall} /> : null}
+          {tab === "events" ? <EventsList events={events} /> : null}
+        </div>
+      </section>
+    </div>
+  );
+}
+
+function ContactsTable({ contacts, onOpen }: { contacts: Contact[]; onOpen: (contact: Contact) => void }) {
+  return (
+    <div className="data-table contacts-table">
+      <div className="table-head">
+        <span>Имя</span>
+        <span>Телефон</span>
+        <span>Компания</span>
+        <span>Статус</span>
+        <span>Город</span>
       </div>
-      <span className="player-time">{formatDuration(Math.round(current))} / {formatDuration(Math.round(duration || 0))}</span>
+      {contacts.map((contact) => (
+        <button type="button" key={contact.id} className="table-row" onClick={() => onOpen(contact)}>
+          <span><strong>{compactText(contact.name, "Без имени")}</strong></span>
+          <span className="mono">{contact.phone}</span>
+          <span>{compactText(contact.company)}</span>
+          <span><span className={`status-pill ${statusTone(contact.attendance_status)}`}>{statusRu(contact.attendance_status)}</span></span>
+          <span className="muted-text">{compactText(contact.city)}</span>
+        </button>
+      ))}
+      {!contacts.length ? <EmptyBlock title="Контактов нет" text="В этой кампании пока нет загруженных строк." /> : null}
+    </div>
+  );
+}
+
+function TasksTable({ tasks }: { tasks: Task[] }) {
+  return (
+    <div className="data-table tasks-table">
+      <div className="table-head">
+        <span>ID задачи</span>
+        <span>Статус</span>
+        <span>Попытки</span>
+        <span>Последний статус</span>
+      </div>
+      {tasks.map((task) => (
+        <div key={task.id} className="table-row static">
+          <span className="mono">#{task.id}</span>
+          <span><span className={`status-pill ${statusTone(task.status)}`}>{statusRu(task.status)}</span></span>
+          <span>{task.attempt_count || 0}/{task.max_attempts || 1}</span>
+          <span>{compactText(task.last_status_message || task.result_summary || task.last_error || task.last_status, "Ожидает")}</span>
+        </div>
+      ))}
+      {!tasks.length ? <EmptyBlock title="Задач нет" text="После загрузки базы здесь появится очередь обзвона." /> : null}
+    </div>
+  );
+}
+
+function CampaignCalls({ calls, onOpen }: { calls: Call[]; onOpen: (call: Call) => void }) {
+  return (
+    <div className="data-table calls-table">
+      <div className="table-head">
+        <span>Клиент</span>
+        <span>Итог</span>
+        <span>Длительность</span>
+        <span>Саммари</span>
+      </div>
+      {calls.map((call) => (
+        <button type="button" key={call.id} className="table-row" onClick={() => onOpen(call)}>
+          <span>
+            <strong>{callName(call)}</strong>
+            <small>{callPhone(call)}</small>
+          </span>
+          <span><span className={`status-pill ${statusTone(call.status)}`}>{statusRu(call.status)}</span></span>
+          <span>{formatDuration(call.duration)}</span>
+          <span className="summary-cell">{callSummary(call)}</span>
+        </button>
+      ))}
+      {!calls.length ? <EmptyBlock title="Звонков нет" text="Когда начнется обзвон, здесь появятся результаты и записи." /> : null}
+    </div>
+  );
+}
+
+function EventsList({ events }: { events: Array<Record<string, unknown>> }) {
+  return (
+    <div className="events-list">
+      {events.map((event, index) => {
+        const status = eventValue(event, "status") || eventValue(event, "stage");
+        return (
+          <div className={`event-item ${statusTone(status)}`} key={`${eventValue(event, "id") || index}`}>
+            {statusTone(status) === "bad" ? <AlertCircle size={18} /> : <CheckCircle2 size={18} />}
+            <span>{compactText(eventValue(event, "message") || eventValue(event, "stage"), "Событие")}</span>
+            <time>{formatDate(eventValue(event, "created_at") || eventValue(event, "timestamp_utc"))}</time>
+          </div>
+        );
+      })}
+      {!events.length ? <EmptyBlock title="Событий нет" text="Статусы сценария появятся во время запуска и завершения звонков." /> : null}
+    </div>
+  );
+}
+
+function ContactDetail({
+  contact,
+  onBack,
+  onSaved,
+}: {
+  contact: Contact;
+  onBack: () => void;
+  onSaved: () => void;
+}) {
+  const [draft, setDraft] = useState({
+    name: contact.name || "",
+    phone: contact.phone || "",
+    company: contact.company || "",
+    city: contact.city || "",
+    context: contact.context || "",
+    preferred_time: contact.preferred_time || "",
+  });
+  const [saving, setSaving] = useState(false);
+
+  async function save() {
+    setSaving(true);
+    try {
+      await api.updateContact(contact.id, draft);
+      onSaved();
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  return (
+    <div className="screen-stack enter">
+      <button type="button" className="back-button" onClick={onBack}>
+        <ArrowLeft size={20} />
+        <span>Назад к кампании</span>
+      </button>
+      <section className="object-detail-card">
+        <div className="object-head">
+          <div>
+            <p className="eyebrow">Карточка контакта</p>
+            <h2>{compactText(contact.name, "Без имени")}</h2>
+            <p>{compactText(contact.company)} · {compactText(contact.phone)}</p>
+          </div>
+          <span className={`status-pill ${statusTone(contact.task?.status)}`}>{statusRu(contact.task?.status)}</span>
+        </div>
+
+        <div className="edit-grid">
+          <label className="field"><span>Имя</span><input value={draft.name} onChange={(event) => setDraft({ ...draft, name: event.target.value })} /></label>
+          <label className="field"><span>Телефон</span><input value={draft.phone} onChange={(event) => setDraft({ ...draft, phone: event.target.value })} /></label>
+          <label className="field"><span>Компания</span><input value={draft.company} onChange={(event) => setDraft({ ...draft, company: event.target.value })} /></label>
+          <label className="field"><span>Город</span><input value={draft.city} onChange={(event) => setDraft({ ...draft, city: event.target.value })} /></label>
+          <label className="field wide-field"><span>Контекст для AI</span><textarea value={draft.context} onChange={(event) => setDraft({ ...draft, context: event.target.value })} /></label>
+          <label className="field"><span>Удобное время</span><input value={draft.preferred_time} onChange={(event) => setDraft({ ...draft, preferred_time: event.target.value })} /></label>
+        </div>
+
+        <div className="contact-facts">
+          <ResultLine label="Пришел на мероприятие" value={statusRu(contact.attendance_status)} />
+          <ResultLine label="Вид деятельности" value={contact.activity_type} />
+          <ResultLine label="Руководитель" value={contact.is_decision_maker} />
+          <ResultLine label="Средний чек" value={contact.average_check} />
+          <ResultLine label="Трафик" value={contact.traffic_source} />
+          <ResultLine label="Впечатление от бота" value={contact.bot_impression} />
+        </div>
+
+        <button type="button" className="action-button primary save-contact" onClick={save} disabled={saving}>
+          {saving ? <RefreshCw size={17} className="spin" /> : <Save size={17} />}
+          <span>{saving ? "Сохраняю" : "Сохранить контакт"}</span>
+        </button>
+      </section>
+    </div>
+  );
+}
+
+function CallDetail({ call, onBack }: { call: Call; onBack: () => void }) {
+  const facts = splitFacts(call.summary || call.outcome || call.dialogue_text);
+  const src = recordingSource(call);
+  const externalRecordingUrl = recordingExternalUrl(call);
+  const recordingWasNotStarted = call.recording_status === "not_started";
+  const recordingUrlMissing = !src && !externalRecordingUrl && ["ready", "recording_ready"].includes(call.recording_status || "");
+
+  return (
+    <div className="screen-stack enter">
+      <button type="button" className="back-button" onClick={onBack}>
+        <ArrowLeft size={20} />
+        <span>К списку звонков</span>
+      </button>
+
+      <section className="object-detail-card call-detail-card">
+        <div className="object-head">
+          <div>
+            <p className="eyebrow">Звонок #{shortId(call.session_id || call.id)}</p>
+            <h2>{callName(call)}</h2>
+            <p>{callPhone(call)} · {formatDate(call.updated_at || call.started_at)}</p>
+          </div>
+          <span className={`status-pill ${statusTone(call.status)}`}>{statusRu(call.status)}</span>
+        </div>
+
+        <div className="call-result-hero">
+          <span>Итог разговора</span>
+          <strong>{callSummary(call)}</strong>
+        </div>
+
+        <div className="contact-facts call-facts">
+          <ResultLine label="Длительность" value={formatDuration(call.duration)} />
+          <ResultLine label="Следующий шаг" value={call.next_step} />
+          <ResultLine label="Статус записи" value={statusRu(call.recording_status)} />
+          <ResultLine label="ID сессии" value={call.session_id} />
+        </div>
+
+        <section className="detail-section">
+          <h3>Собранные данные</h3>
+          {facts.length ? (
+            <div className="facts-list">
+              {facts.map((fact, index) => <span key={`${fact}-${index}`}>{fact}</span>)}
+            </div>
+          ) : (
+            <EmptyBlock title="Данных пока нет" text="Summary появится после финализации звонка." compact />
+          )}
+        </section>
+
+        <section className="detail-section">
+          <h3>Запись разговора</h3>
+          {src ? (
+            <RecordingPlayer src={src} />
+          ) : externalRecordingUrl ? (
+            <a className="audio-card recording-link-card" href={externalRecordingUrl} target="_blank" rel="noreferrer">
+              <span className="play-orb"><ExternalLink size={20} /></span>
+              <span className="recording-link-copy">
+                <strong>Открыть запись</strong>
+                <small>Файл доступен по внешней ссылке Voximplant.</small>
+              </span>
+            </a>
+          ) : (
+            <EmptyBlock
+              title={recordingWasNotStarted ? "Запись не создавалась" : recordingUrlMissing ? "Ссылка на запись не пришла" : "Запись готовится"}
+              text={recordingWasNotStarted ? "Для недозвона аудио обычно отсутствует." : recordingUrlMissing ? "В базе есть статус готовности, но нет URL для проигрывания." : "Файл может появиться через несколько минут после завершения разговора."}
+              compact
+            />
+          )}
+        </section>
+
+        <section className="detail-section">
+          <h3>Сводка</h3>
+          <p className="text-box">{compactText(call.summary || call.outcome, "Сводка по звонку пока не пришла.")}</p>
+        </section>
+
+        <section className="detail-section">
+          <h3>Диалог</h3>
+          <pre className="dialogue-box">{compactText(call.dialogue_text, "Текст диалога пока не сохранен.")}</pre>
+        </section>
+      </section>
     </div>
   );
 }
@@ -1227,104 +854,25 @@ function ResultLine({ label, value }: { label: string; value?: string | null }) 
   return (
     <div className="result-line">
       <span>{label}</span>
-      <strong>{compactText(value, "не указано")}</strong>
+      <strong>{compactText(value, "Не указано")}</strong>
     </div>
   );
 }
 
-function CallResultPanel({ call }: { call: Call | null }) {
-  if (!call) {
-    return (
-      <aside className="call-inspector empty-inspector">
-        <Glyph name="calls" size={34} />
-        <h2>Выберите звонок</h2>
-        <p>Нажмите на строку в списке, чтобы увидеть итог, следующий шаг, запись и текст диалога.</p>
-      </aside>
-    );
-  }
-
-  const src = recordingSource(call);
-  const facts = splitFacts(call.summary || call.outcome || call.dialogue_text);
-  const rating = extractRating(call.summary || call.outcome || call.dialogue_text);
-  const hasProblem = statusTone(call.status) === "bad";
-
+function EmptyBlock({ title, text, compact = false }: { title: string; text: string; compact?: boolean }) {
   return (
-    <aside className="call-inspector">
-      <div className="inspector-head">
-        <div>
-          <p>Звонок #{call.session_id || call.id}</p>
-          <h2>{callName(call)}</h2>
-          <span>{callPhone(call)} · {formatDate(call.updated_at)}</span>
-        </div>
-        <span className={`status-pill ${statusTone(call.status)}`}>{statusRu(call.status)}</span>
-      </div>
-
-      <div className="result-hero">
-        <div className="result-eyebrow">
-          <span>Итог разговора</span>
-          <span className={`result-chip ${hasProblem ? "bad" : "good"}`}>{hasProblem ? "требует внимания" : "обработан"}</span>
-        </div>
-        <strong>{callShortResult(call)}</strong>
-      </div>
-
-      <div className="result-grid">
-        <ResultLine label="Причина статуса" value={callHumanReason(call)} />
-        <ResultLine label="Следующий шаг" value={call.next_step} />
-        <ResultLine label="Оценка AI" value={rating || "не зафиксирована"} />
-        <ResultLine label="Длительность" value={formatDuration(call.duration)} />
-      </div>
-
-      <section className="inspector-section facts-section">
-        <div className="section-kicker">
-          <Glyph name="done" size={16} />
-          <span>Собранные данные</span>
-        </div>
-        {facts.length ? (
-          <div className="facts-list">
-            {facts.map((fact, index) => (
-              <span key={`${fact}-${index}`}>{fact}</span>
-            ))}
-          </div>
-        ) : (
-          <div className="recording-empty">Данных по разговору пока нет. Они появятся после обработки звонка.</div>
-        )}
-      </section>
-
-      <section className="inspector-section">
-        <div className="section-kicker">
-          <Glyph name="wave" size={16} />
-          <span>Запись разговора</span>
-        </div>
-        {src ? <AudioPlayer src={src} /> : <div className="recording-empty">Запись ещё готовится. Обычно файл появляется через несколько минут после звонка.</div>}
-      </section>
-
-      <section className="inspector-section">
-        <div className="section-kicker">
-          <Glyph name="campaigns" size={16} />
-          <span>Сводка</span>
-        </div>
-        <p className="detail-copy">{compactText(call.summary || call.outcome, "Сводка по звонку пока не пришла.")}</p>
-      </section>
-
-      <section className="inspector-section">
-        <div className="section-kicker">
-          <Glyph name="calls" size={16} />
-          <span>Диалог</span>
-        </div>
-        <pre className="dialogue-box">{compactText(call.dialogue_text, "Текст диалога пока не сохранён. Проверьте запись разговора или дождитесь транскрибации.")}</pre>
-      </section>
-    </aside>
+    <div className={`empty-block ${compact ? "compact" : ""}`}>
+      <Search size={compact ? 22 : 30} />
+      <strong>{title}</strong>
+      <span>{text}</span>
+    </div>
   );
 }
 
-function EmptyText({ text }: { text: string }) {
-  return <div className="empty-text">{text}</div>;
-}
-
-function Skeleton({ title }: { title: string }) {
+function LoadingPanel({ title }: { title: string }) {
   return (
-    <div className="skeleton-panel">
-      <Glyph name="refresh" size={20} className="spin" />
+    <div className="loading-panel">
+      <RefreshCw size={22} className="spin" />
       <span>{title}</span>
     </div>
   );
@@ -1333,15 +881,22 @@ function Skeleton({ title }: { title: string }) {
 export function App() {
   const [authenticated, setAuthenticated] = useState(false);
   const [checkingAuth, setCheckingAuth] = useState(true);
-  const [activeTab, setActiveTab] = useState<Tab>("dashboard");
   const [dashboard, setDashboard] = useState<Dashboard | null>(null);
   const [campaigns, setCampaigns] = useState<Campaign[]>([]);
   const [selectedCampaignId, setSelectedCampaignId] = useState<number | null>(null);
   const [selectedCampaign, setSelectedCampaign] = useState<CampaignDetail | null>(null);
-  const [selectedCallId, setSelectedCallId] = useState<number | null>(null);
+  const [selectedContact, setSelectedContact] = useState<Contact | null>(null);
+  const [selectedCall, setSelectedCall] = useState<Call | null>(null);
+  const [detailTab, setDetailTab] = useState<DetailTab>("contacts");
   const [calls, setCalls] = useState<Call[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
+  const [message, setMessage] = useState("");
+
+  const selectedCallFromList = useMemo(() => {
+    if (!selectedCall) return null;
+    return calls.find((call) => call.id === selectedCall.id) || selectedCampaign?.calls.find((call) => call.id === selectedCall.id) || selectedCall;
+  }, [calls, selectedCall, selectedCampaign]);
 
   async function refresh(targetCampaignId = selectedCampaignId) {
     if (!authenticated) return;
@@ -1351,20 +906,21 @@ export function App() {
       const [dashboardData, campaignData, callsData] = await Promise.all([
         api.dashboard(),
         api.campaigns(),
-        api.calls(80),
+        api.calls(100),
       ]);
       setDashboard(dashboardData);
       setCampaigns(campaignData);
       setCalls(callsData);
-      const nextCampaignId = targetCampaignId || campaignData[0]?.id || null;
-      setSelectedCampaignId(nextCampaignId);
-      if (!selectedCallId && callsData[0]) {
-        setSelectedCallId((callsData.find((call) => Boolean(call.recording_download_url)) || callsData[0]).id);
-      }
-      if (nextCampaignId) {
-        setSelectedCampaign(await api.campaign(nextCampaignId));
-      } else {
-        setSelectedCampaign(null);
+
+      const idToLoad = targetCampaignId || selectedCampaignId;
+      if (idToLoad) {
+        const detail = await api.campaign(idToLoad);
+        setSelectedCampaign(detail);
+        setSelectedCampaignId(idToLoad);
+        if (selectedContact) {
+          const nextContact = detail.contacts.find((item) => item.id === selectedContact.id) || null;
+          setSelectedContact(nextContact);
+        }
       }
     } catch (err) {
       setError(err instanceof Error ? err.message : "Не удалось загрузить данные");
@@ -1382,15 +938,16 @@ export function App() {
   }, []);
 
   useEffect(() => {
-    if (authenticated) {
-      void refresh();
-    }
+    if (authenticated) void refresh(null);
   }, [authenticated]);
 
-  async function selectCampaign(id: number) {
-    setSelectedCampaignId(id);
-    setActiveTab("campaigns");
+  async function openCampaign(id: number) {
     setLoading(true);
+    setError("");
+    setSelectedCampaignId(id);
+    setSelectedContact(null);
+    setSelectedCall(null);
+    setDetailTab("contacts");
     try {
       setSelectedCampaign(await api.campaign(id));
     } catch (err) {
@@ -1400,9 +957,50 @@ export function App() {
     }
   }
 
-  function selectCall(call: Call) {
-    setSelectedCallId(call.id);
-    setActiveTab("calls");
+  async function uploadBase(file: File) {
+    setLoading(true);
+    setError("");
+    setMessage("");
+    try {
+      const result: ImportResult = await api.upload(file);
+      setMessage(`База загружена: ${result.campaign.name}`);
+      await refresh(result.campaign.id);
+      await openCampaign(result.campaign.id);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Не удалось загрузить файл");
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  async function campaignAction(action: CampaignAction) {
+    if (!selectedCampaignId) return;
+    setLoading(true);
+    setError("");
+    try {
+      await api.setCampaignStatus(selectedCampaignId, action);
+      setMessage(action === "run" ? "Кампания запущена" : action === "pause" ? "Кампания поставлена на паузу" : "Кампания подготовлена к повторному запуску");
+      await refresh(selectedCampaignId);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Не удалось выполнить действие");
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  async function saveDelay(seconds: number) {
+    if (!selectedCampaignId) return;
+    setLoading(true);
+    setError("");
+    try {
+      await api.setDelay(selectedCampaignId, Math.max(0, Number(seconds || 0)));
+      setMessage(`Пауза обновлена: ${formatDelay(seconds)}`);
+      await refresh(selectedCampaignId);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Не удалось сохранить паузу");
+    } finally {
+      setLoading(false);
+    }
   }
 
   async function logout() {
@@ -1411,50 +1009,59 @@ export function App() {
     setDashboard(null);
     setCampaigns([]);
     setSelectedCampaign(null);
+    setSelectedCampaignId(null);
+    setSelectedContact(null);
+    setSelectedCall(null);
     setCalls([]);
   }
 
-  if (checkingAuth) return <Skeleton title="Проверяю доступ" />;
+  if (checkingAuth) return <LoadingPanel title="Проверяю доступ" />;
   if (!authenticated) return <LoginView onLogin={() => setAuthenticated(true)} />;
 
   return (
-    <div className="app-shell">
-      <AppHeader
-        activeTab={activeTab}
-        onTab={setActiveTab}
-        onLogout={logout}
-        onRefresh={() => void refresh()}
+    <main className="app-shell">
+      <TopBar
         loading={loading}
+        message={message}
+        error={error}
+        onRefresh={() => void refresh()}
+        onLogout={() => void logout()}
+        onUpload={(file) => void uploadBase(file)}
+        onClearMessage={() => {
+          setError("");
+          setMessage("");
+        }}
       />
-      <main className="content">
-        {error ? (
-          <div className="top-error">
-            <Glyph name="alert" size={17} />
-            <span>{error}</span>
-            <button type="button" onClick={() => setError("")}>Закрыть</button>
-          </div>
-        ) : null}
 
-        {activeTab === "dashboard" ? (
-          <DashboardView dashboard={dashboard} onOpenCampaign={selectCampaign} onOpenCall={selectCall} />
-        ) : null}
-
-        {activeTab === "campaigns" ? (
-          <CampaignsView
-            campaigns={campaigns}
-            selected={selectedCampaign}
-            onSelect={selectCampaign}
-            onOpenCall={selectCall}
-            onUploaded={(result) => {
-              setSelectedCampaignId(result.campaign.id);
-              void refresh(result.campaign.id);
-            }}
-            onAction={() => void refresh(selectedCampaignId)}
-          />
-        ) : null}
-
-        {activeTab === "calls" ? <CallsView calls={calls} selectedCallId={selectedCallId} onSelectCall={selectCall} /> : null}
-      </main>
-    </div>
+      {selectedCallFromList ? (
+        <CallDetail call={selectedCallFromList} onBack={() => setSelectedCall(null)} />
+      ) : selectedContact ? (
+        <ContactDetail contact={selectedContact} onBack={() => setSelectedContact(null)} onSaved={() => void refresh(selectedCampaignId)} />
+      ) : selectedCampaign ? (
+        <CampaignPage
+          detail={selectedCampaign}
+          tab={detailTab}
+          loading={loading}
+          onBack={() => {
+            setSelectedCampaign(null);
+            setSelectedCampaignId(null);
+          }}
+          onTab={setDetailTab}
+          onAction={(action) => void campaignAction(action)}
+          onDelay={(seconds) => void saveDelay(seconds)}
+          onOpenCall={setSelectedCall}
+          onOpenContact={setSelectedContact}
+        />
+      ) : (
+        <DashboardPage
+          dashboard={dashboard}
+          campaigns={campaigns}
+          calls={calls}
+          loading={loading}
+          onOpenCampaign={(id) => void openCampaign(id)}
+          onOpenCall={setSelectedCall}
+        />
+      )}
+    </main>
   );
 }
