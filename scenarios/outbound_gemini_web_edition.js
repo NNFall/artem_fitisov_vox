@@ -6,7 +6,7 @@ require(Modules.ApplicationStorage);
  *
  * Voximplant ApplicationStorage:
  * - GEMINI_API_KEY
- * - BACKEND_URL, for example https://example.com or http://1.2.3.4:8000
+ * - BACKEND_URL, for example https://obzvonai.ru
  * - BACKEND_WEBHOOK_SECRET
  */
 
@@ -15,7 +15,7 @@ const CALLER_ID = '79014172420';
 // VoxEngine.customData or /outbound/tasks/{id}/scenario-context.
 const FALLBACK_CALL_TARGETS = [];
 
-const BACKEND_URL_FALLBACK = 'http://186.246.18.100:8002';
+const BACKEND_URL_FALLBACK = 'https://obzvonai.ru';
 const BACKEND_WEBHOOK_SECRET_FALLBACK = '';
 
 const PROJECT_NAME = 'artem_fitisov';

@@ -1,10 +1,14 @@
 import type { Campaign, CampaignDetail, Contact, Dashboard, ImportResult, Call } from "./types";
 
 const envBase = import.meta.env.VITE_API_BASE_URL as string | undefined;
+const defaultBase =
+  window.location.port === "3002"
+    ? `${window.location.protocol}//${window.location.hostname}:8002`
+    : window.location.origin;
 
 export const API_BASE =
   envBase?.replace(/\/$/, "") ||
-  `${window.location.protocol}//${window.location.hostname}:8002`;
+  defaultBase;
 
 async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
   const response = await fetch(`${API_BASE}${path}`, {

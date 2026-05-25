@@ -9,7 +9,7 @@ services:
     env_file:
       - ./backend/.env
     environment:
-      PUBLIC_BACKEND_URL: http://186.246.18.100:8002
+      PUBLIC_BACKEND_URL: https://obzvonai.ru
     volumes:
       - ./backend:/app/backend
     ports:

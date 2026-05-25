@@ -85,7 +85,7 @@ WEB_CORS_ORIGINS = [
     item.strip().rstrip("/")
     for item in os.getenv(
         "WEB_CORS_ORIGINS",
-        "http://localhost:5173,http://127.0.0.1:5173,http://186.246.18.100:3002,http://186.246.18.100:8082",
+        "http://localhost:5173,http://127.0.0.1:5173,http://186.246.18.100:3002,http://186.246.18.100:8082,https://obzvonai.ru,https://www.obzvonai.ru",
     ).split(",")
     if item.strip()
 ]

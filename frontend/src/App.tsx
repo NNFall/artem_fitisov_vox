@@ -41,6 +41,11 @@ type ContactHistory = {
   name: string;
   calls: Call[];
 };
+type CampaignShell = {
+  id: number;
+  name: string;
+  source_filename?: string | null;
+};
 
 const statusLabels: Record<string, string> = {
   active: "Активна",
@@ -270,6 +275,10 @@ function eventValue(event: Record<string, unknown>, key: string) {
 function shortId(value?: string | number | null) {
   const text = String(value || "");
   return text.length > 22 ? `${text.slice(0, 12)}...${text.slice(-6)}` : text;
+}
+
+function SkeletonLine({ wide = false }: { wide?: boolean }) {
+  return <span className={`skeleton-line ${wide ? "wide" : ""}`} aria-hidden="true" />;
 }
 
 function LoginView({ onLogin }: { onLogin: () => void }) {
@@ -502,7 +511,7 @@ function DashboardPage({
   campaigns: Campaign[];
   calls: Call[];
   loading: boolean;
-  onOpenCampaign: (id: number) => void;
+  onOpenCampaign: (campaign: Campaign) => void;
   onOpenCall: (call: Call) => void;
 }) {
   if (!dashboard && loading) return <LoadingPanel title="Загружаю обзор" />;
@@ -528,7 +537,7 @@ function DashboardPage({
           </div>
           <div className="campaign-list">
             {campaigns.map((campaign) => (
-              <button type="button" className="campaign-card" key={campaign.id} onClick={() => onOpenCampaign(campaign.id)}>
+              <button type="button" className="campaign-card" key={campaign.id} onClick={() => onOpenCampaign(campaign)}>
                 <span>
                   <strong>{campaign.name}</strong>
                   <small>
@@ -686,6 +695,87 @@ function CampaignPage({
           {tab === "events" ? <EventsList events={events} /> : null}
         </div>
       </section>
+    </div>
+  );
+}
+
+function CampaignPageSkeleton({
+  campaign,
+  tab,
+  onBack,
+  onTab,
+}: {
+  campaign: CampaignShell;
+  tab: DetailTab;
+  onBack: () => void;
+  onTab: (tab: DetailTab) => void;
+}) {
+  return (
+    <div className="screen-stack enter">
+      <button type="button" className="back-button" onClick={onBack}>
+        <ArrowLeft size={20} />
+        <span>Назад</span>
+      </button>
+
+      <section className="campaign-detail-card loading-shell">
+        <div className="campaign-detail-head">
+          <div>
+            <h2>{campaign.name}</h2>
+            <p>Файл базы: {compactText(campaign.source_filename, "загружаю данные")}</p>
+          </div>
+          <span className="loading-chip"><RefreshCw size={15} className="spin" />Загружаю кампанию</span>
+        </div>
+
+        <div className="detail-metrics">
+          {["Всего задач", "В очереди", "Завершено", "Ошибки"].map((label) => (
+            <section className="metric-card skeleton-card" key={label}>
+              <span>{label}</span>
+              <SkeletonLine />
+            </section>
+          ))}
+        </div>
+
+        <div className="campaign-info-grid">
+          {[0, 1, 2].map((item) => (
+            <div key={item} className="skeleton-info-card">
+              <SkeletonLine />
+              <SkeletonLine wide />
+              <SkeletonLine />
+            </div>
+          ))}
+        </div>
+      </section>
+
+      <section className="detail-tabs-card loading-shell">
+        <div className="tabs-row">
+          {detailTabs.map((item) => {
+            const Icon = item.icon;
+            return (
+              <button type="button" key={item.id} className={`tab-button ${tab === item.id ? "active" : ""}`} onClick={() => onTab(item.id)}>
+                <Icon size={19} />
+                <span>{item.label}</span>
+              </button>
+            );
+          })}
+        </div>
+        <div className="tab-content">
+          <TableSkeleton rows={6} columns={tab === "calls" ? 5 : tab === "tasks" ? 4 : 5} />
+        </div>
+      </section>
+    </div>
+  );
+}
+
+function TableSkeleton({ rows, columns }: { rows: number; columns: number }) {
+  return (
+    <div className="data-table skeleton-table" aria-label="Загружаю данные">
+      {Array.from({ length: rows }).map((_, rowIndex) => (
+        <div className="table-row static skeleton-row" key={rowIndex} style={{ ["--columns" as string]: columns }}>
+          {Array.from({ length: columns }).map((__, columnIndex) => (
+            <SkeletonLine key={columnIndex} wide={columnIndex === columns - 1} />
+          ))}
+        </div>
+      ))}
     </div>
   );
 }
@@ -989,12 +1079,14 @@ function DialogueThread({ turns }: { turns: DialogueTurn[] }) {
 function ContactHistoryPage({
   history,
   campaigns,
+  loading,
   onBack,
   onOpenCall,
   onOpenCampaign,
 }: {
   history: ContactHistory;
   campaigns: Campaign[];
+  loading: boolean;
   onBack: () => void;
   onOpenCall: (call: Call) => void;
   onOpenCampaign: (id: number) => void;
@@ -1017,7 +1109,7 @@ function ContactHistoryPage({
             <h2>{history.name}</h2>
             <p>{history.phone} · {formatCount(history.calls.length, "касание", "касания", "касаний")}</p>
           </div>
-          {lastCall ? <span className={`status-pill ${statusTone(lastCall.status)}`}>{statusRu(lastCall.status)}</span> : null}
+          {loading ? <span className="loading-chip"><RefreshCw size={15} className="spin" />Обновляю историю</span> : lastCall ? <span className={`status-pill ${statusTone(lastCall.status)}`}>{statusRu(lastCall.status)}</span> : null}
         </div>
 
         <div className="detail-metrics compact-metrics">
@@ -1057,7 +1149,8 @@ function ContactHistoryPage({
               </article>
             );
           })}
-          {!history.calls.length ? <EmptyBlock title="Истории пока нет" text="По этому номеру еще не найдено входящих или исходящих звонков." /> : null}
+          {loading && !history.calls.length ? <TableSkeleton rows={3} columns={3} /> : null}
+          {!loading && !history.calls.length ? <EmptyBlock title="Истории пока нет" text="По этому номеру еще не найдено входящих или исходящих звонков." /> : null}
         </div>
       </section>
     </div>
@@ -1102,16 +1195,25 @@ export function App() {
   const [selectedContact, setSelectedContact] = useState<Contact | null>(null);
   const [selectedCall, setSelectedCall] = useState<Call | null>(null);
   const [selectedHistory, setSelectedHistory] = useState<ContactHistory | null>(null);
+  const [historyLoading, setHistoryLoading] = useState(false);
   const [detailTab, setDetailTab] = useState<DetailTab>("calls");
   const [calls, setCalls] = useState<Call[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
   const [message, setMessage] = useState("");
+  const campaignRequestRef = useRef(0);
+  const historyRequestRef = useRef(0);
 
   const selectedCallFromList = useMemo(() => {
     if (!selectedCall) return null;
     return calls.find((call) => call.id === selectedCall.id) || selectedCampaign?.calls.find((call) => call.id === selectedCall.id) || selectedCall;
   }, [calls, selectedCall, selectedCampaign]);
+
+  const selectedCampaignShell = useMemo(() => {
+    if (!selectedCampaignId) return null;
+    const campaign = selectedCampaign?.campaign || campaigns.find((item) => item.id === selectedCampaignId);
+    return campaign ? { id: campaign.id, name: campaign.name, source_filename: campaign.source_filename } : null;
+  }, [campaigns, selectedCampaign, selectedCampaignId]);
 
   async function refresh(targetCampaignId = selectedCampaignId) {
     if (!authenticated) return;
@@ -1156,20 +1258,32 @@ export function App() {
     if (authenticated) void refresh(null);
   }, [authenticated]);
 
-  async function openCampaign(id: number) {
+  async function openCampaign(campaign: Campaign | CampaignShell | number) {
+    const campaignId = typeof campaign === "number" ? campaign : campaign.id;
+    const requestId = campaignRequestRef.current + 1;
+    campaignRequestRef.current = requestId;
     setLoading(true);
     setError("");
-    setSelectedCampaignId(id);
+    setSelectedCampaignId(campaignId);
+    setSelectedCampaign(null);
     setSelectedContact(null);
     setSelectedCall(null);
     setSelectedHistory(null);
+    setHistoryLoading(false);
     setDetailTab("calls");
     try {
-      setSelectedCampaign(await api.campaign(id));
+      const detail = await api.campaign(campaignId);
+      if (campaignRequestRef.current === requestId) {
+        setSelectedCampaign(detail);
+      }
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Не удалось открыть кампанию");
+      if (campaignRequestRef.current === requestId) {
+        setError(err instanceof Error ? err.message : "Не удалось открыть кампанию");
+      }
     } finally {
-      setLoading(false);
+      if (campaignRequestRef.current === requestId) {
+        setLoading(false);
+      }
     }
   }
 
@@ -1181,13 +1295,21 @@ export function App() {
     }
 
     setLoading(true);
+    setHistoryLoading(true);
     setError("");
+    const requestId = historyRequestRef.current + 1;
+    historyRequestRef.current = requestId;
+    const localCalls = [
+      ...(selectedCampaign?.calls || []),
+      ...calls,
+    ].filter((call) => sameCallPhone(call, normalizedPhone));
+    setSelectedCall(null);
+    setSelectedContact(null);
+    setSelectedHistory({ phone: normalizedPhone, name, calls: localCalls });
+
     try {
       const historyCalls = await api.callHistory(normalizedPhone, 100);
-      const localCalls = [
-        ...(selectedCampaign?.calls || []),
-        ...calls,
-      ].filter((call) => sameCallPhone(call, normalizedPhone));
+      if (historyRequestRef.current !== requestId) return;
       const byId = new Map<number, Call>();
       [...historyCalls, ...localCalls].forEach((call) => byId.set(call.id, call));
       const mergedCalls = Array.from(byId.values()).sort((a, b) => {
@@ -1195,13 +1317,16 @@ export function App() {
         const bTime = new Date(callDateValue(b) || 0).getTime();
         return bTime - aTime || b.id - a.id;
       });
-      setSelectedCall(null);
-      setSelectedContact(null);
       setSelectedHistory({ phone: normalizedPhone, name, calls: mergedCalls });
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Не удалось загрузить историю клиента");
+      if (historyRequestRef.current === requestId) {
+        setError(err instanceof Error ? err.message : "Не удалось загрузить историю клиента");
+      }
     } finally {
-      setLoading(false);
+      if (historyRequestRef.current === requestId) {
+        setHistoryLoading(false);
+        setLoading(false);
+      }
     }
   }
 
@@ -1261,6 +1386,9 @@ export function App() {
     setSelectedContact(null);
     setSelectedCall(null);
     setSelectedHistory(null);
+    setHistoryLoading(false);
+    campaignRequestRef.current += 1;
+    historyRequestRef.current += 1;
     setCalls([]);
   }
 
@@ -1288,7 +1416,12 @@ export function App() {
         <ContactHistoryPage
           history={selectedHistory}
           campaigns={campaigns}
-          onBack={() => setSelectedHistory(null)}
+          loading={historyLoading}
+          onBack={() => {
+            historyRequestRef.current += 1;
+            setHistoryLoading(false);
+            setSelectedHistory(null);
+          }}
           onOpenCall={setSelectedCall}
           onOpenCampaign={(id) => void openCampaign(id)}
         />
@@ -1305,8 +1438,10 @@ export function App() {
           tab={detailTab}
           loading={loading}
           onBack={() => {
+            campaignRequestRef.current += 1;
             setSelectedCampaign(null);
             setSelectedCampaignId(null);
+            setLoading(false);
           }}
           onTab={setDetailTab}
           onAction={(action) => void campaignAction(action)}
@@ -1314,13 +1449,25 @@ export function App() {
           onOpenCall={setSelectedCall}
           onOpenContact={setSelectedContact}
         />
+      ) : selectedCampaignShell ? (
+        <CampaignPageSkeleton
+          campaign={selectedCampaignShell}
+          tab={detailTab}
+          onBack={() => {
+            campaignRequestRef.current += 1;
+            setSelectedCampaign(null);
+            setSelectedCampaignId(null);
+            setLoading(false);
+          }}
+          onTab={setDetailTab}
+        />
       ) : (
         <DashboardPage
           dashboard={dashboard}
           campaigns={campaigns}
           calls={calls}
           loading={loading}
-          onOpenCampaign={(id) => void openCampaign(id)}
+          onOpenCampaign={(campaign) => void openCampaign(campaign)}
           onOpenCall={(call) => {
             setSelectedHistory(null);
             setSelectedCall(call);

@@ -9,11 +9,11 @@ require(Modules.ApplicationStorage);
  *
  * Voximplant ApplicationStorage:
  * - GEMINI_API_KEY
- * - BACKEND_URL, for example http://186.246.18.100:8001
+ * - BACKEND_URL, for example https://obzvonai.ru
  * - BACKEND_WEBHOOK_SECRET
  */
 
-const BACKEND_URL_FALLBACK = 'http://186.246.18.100:8002';
+const BACKEND_URL_FALLBACK = 'https://obzvonai.ru';
 const BACKEND_WEBHOOK_SECRET_FALLBACK = '';
 
 const PROJECT_NAME = 'artem_fitisov';
