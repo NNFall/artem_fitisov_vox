@@ -4,6 +4,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import AsyncMock, patch
 
 from fastapi.testclient import TestClient
 
@@ -140,6 +141,76 @@ class WebApiTest(unittest.TestCase):
         self.assertEqual(update.status_code, 200, update.text)
         self.assertEqual(update.json()["name"], "Никита Ф.")
         self.assertEqual(update.json()["company"], "Nord Wood Studio")
+
+    def test_inbound_finalize_sends_concise_summary_and_schedules_recording_reply(self):
+        with (
+            patch.object(self.main, "bot", object()),
+            patch.object(self.main, "get_summary_chat_ids", return_value=["admin-a", "admin-b"]),
+            patch.object(self.main, "send_telegram_status_message", new_callable=AsyncMock) as send_summary,
+            patch.object(self.main, "send_telegram_text", new_callable=AsyncMock) as send_legacy_text,
+            patch.object(self.main, "send_to_google_sheets", new_callable=AsyncMock) as send_sheets,
+            patch.object(self.main, "persist_and_send_inbound_recording", new_callable=AsyncMock, create=True) as send_audio,
+        ):
+            send_summary.return_value = [("admin-a", 101), ("admin-b", 102)]
+            send_legacy_text.return_value = ("sent", None)
+            send_sheets.return_value = ("skipped_no_url", None)
+
+            response = self.client.post(
+                "/webhook/voximplant/finalize",
+                headers={"X-Webhook-Secret": "test-webhook-secret"},
+                json={
+                    "session_id": "inbound-session-1",
+                    "script_name": "inbound_gemini_web_edition.js",
+                    "finalization_reason": "call_disconnected",
+                    "caller_phone": "79958407752",
+                    "client_phone": "79958407752",
+                    "client_name": "Никита",
+                    "call_duration_sec": 74,
+                    "telephony_cost_rub": 3.2,
+                    "voximplant_total_rub": 3.7,
+                    "ai_cost_rub": 4.1,
+                    "total_cost_rub": 7.8,
+                    "summary": "Клиент перезвонил после пропущенного исходящего звонка.",
+                    "outcome": "Нужен повторный контакт менеджера.",
+                    "next_step": "Передать менеджеру.",
+                    "dialogue_text": "Полный диалог не должен попадать в краткое Telegram-сообщение.",
+                    "recording_url": "https://voximplant.example/record.mp3",
+                    "recording_status": "ready",
+                },
+            )
+
+        self.assertEqual(response.status_code, 200, response.text)
+        payload = response.json()
+        self.assertEqual(payload["telegram_summary_status"], "sent")
+        self.assertEqual(payload["telegram_admin_status"], "skipped_inbound_concise")
+        self.assertEqual(payload["recording_send_status"], "scheduled")
+        send_legacy_text.assert_not_awaited()
+        send_summary.assert_awaited_once()
+        chat_ids, html_text = send_summary.await_args.args
+        self.assertEqual(chat_ids, ["admin-a", "admin-b"])
+        self.assertIn("Входящий вызов завершен", html_text)
+        self.assertIn("Номер", html_text)
+        self.assertIn("79958407752", html_text)
+        self.assertIn("Длительность", html_text)
+        self.assertIn("Итоговая стоимость", html_text)
+        self.assertIn("Кратко", html_text)
+        self.assertNotIn("Диалог", html_text)
+        send_audio.assert_called_once_with(
+            "inbound-session-1",
+            "https://voximplant.example/record.mp3",
+            [{"chat_id": "admin-a", "message_id": 101}, {"chat_id": "admin-b", "message_id": 102}],
+        )
+
+        db = self.database.SessionLocal()
+        try:
+            db_call = db.query(self.database.Call).filter(
+                self.database.Call.voximplant_session_id == "inbound-session-1"
+            ).first()
+            self.assertIsNotNone(db_call)
+            self.assertEqual(db_call.telegram_summary_status, "sent")
+            self.assertEqual(db_call.telegram_admin_status, "skipped_inbound_concise")
+        finally:
+            db.close()
 
 
 if __name__ == "__main__":

@@ -1100,6 +1100,58 @@ def render_summary_report(payload: FinalizePayload) -> str:
     lines.extend(["", f"<b>\u041a\u0440\u0430\u0442\u043a\u043e:</b> {display_or_default(payload.summary, DEFAULT_NOT_SPECIFIED)}"])
     return "\n".join(lines)
 
+
+def render_inbound_summary_report(payload: FinalizePayload) -> str:
+    total_cost = payload.total_cost_rub
+    if total_cost is None:
+        total_cost = payload.voximplant_total_rub or payload.telephony_cost_rub
+
+    lines = [
+        "<b>Входящий вызов завершен</b>",
+        format_stat_line("Тип", "входящий вызов"),
+        format_stat_line("Номер", display_or_default(payload.caller_phone or payload.client_phone, DEFAULT_UNKNOWN)),
+        format_stat_line("Имя", display_or_default(payload.client_name, DEFAULT_NOT_SPECIFIED)),
+        format_stat_line("Длительность", f"{safe_text(payload.call_duration_sec or 0)} сек"),
+        format_stat_line("Телефония", f"{safe_text(payload.voximplant_total_rub or payload.telephony_cost_rub or 0)} руб"),
+        format_stat_line("AI", f"{safe_text(payload.ai_cost_rub or 0)} руб"),
+        format_stat_line("Итоговая стоимость", f"{safe_text(total_cost or 0)} руб"),
+        format_stat_line("Итог", display_or_default(payload.outcome, DEFAULT_NOT_SPECIFIED)),
+        format_stat_line("Следующий шаг", display_or_default(payload.next_step, DEFAULT_NOT_SPECIFIED)),
+        "",
+        format_stat_line("Кратко", display_or_default(payload.summary, DEFAULT_NOT_SPECIFIED)),
+    ]
+    if payload.recording_url:
+        lines.append(format_stat_line("Запись", "скачиваю и отправлю аудио ответом на это сообщение"))
+    elif payload.recording_status:
+        lines.append(format_stat_line("Запись", status_ru(payload.recording_status)))
+    return "\n".join(lines)
+
+
+def telegram_refs_status(chat_ids: list[str], refs: list[tuple[str, int]]) -> tuple[str, Optional[str]]:
+    if not chat_ids:
+        return "no_recipients", None
+    if bot is None:
+        return "skipped_no_bot", None
+    if not refs:
+        return "error", "no_message_sent"
+
+    sent_chat_ids = {safe_text(chat_id) for chat_id, _message_id in refs}
+    expected_chat_ids = {safe_text(chat_id) for chat_id in chat_ids}
+    if expected_chat_ids.issubset(sent_chat_ids):
+        return "sent", None
+    return "partial", "not_all_recipients_received_message"
+
+
+async def send_telegram_text_with_refs(chat_ids: list[str], html_text: str) -> tuple[str, Optional[str], list[dict[str, Any]]]:
+    if not html_text:
+        return "empty_message", None, []
+
+    sent_messages = await send_telegram_status_message(chat_ids, html_text)
+    status, error_text = telegram_refs_status(chat_ids, sent_messages)
+    refs = [{"chat_id": chat_id, "message_id": message_id} for chat_id, message_id in sent_messages]
+    return status, error_text, refs
+
+
 async def send_telegram_text(chat_ids: list[str], html_text: str) -> tuple[str, Optional[str]]:
     if not chat_ids:
         return "no_recipients", None
@@ -1328,6 +1380,66 @@ async def send_outbound_recording(task_id: int, local_path: Optional[str]) -> tu
         db.close()
 
 
+async def send_inbound_recording(
+    session_id: str,
+    local_path: Optional[str],
+    reply_refs: Optional[list[dict[str, Any]]] = None,
+) -> tuple[str, Optional[str]]:
+    if bot is None:
+        return "skipped_no_bot", None
+    if not local_path:
+        return "skipped_no_file", None
+
+    file_path = Path(local_path)
+    if not file_path.exists() or not file_path.is_file():
+        return "file_not_found", local_path
+
+    db = SessionLocal()
+    try:
+        db_call = db.query(Call).filter(Call.voximplant_session_id == session_id).first()
+        caption_lines = ["<b>Запись входящего звонка</b>", format_stat_line("Сессия", f"<code>{session_id}</code>")]
+        if db_call:
+            caption_lines.append(format_stat_line("ID звонка", f"#{db_call.id}"))
+            caption_lines.append(format_stat_line("Номер", db_call.caller_phone or db_call.client_phone or "не указан"))
+            if db_call.duration is not None:
+                caption_lines.append(format_stat_line("Длительность", f"{db_call.duration} сек"))
+        caption = "\n".join(caption_lines)
+
+        refs = reply_refs or []
+        if not refs:
+            refs = [{"chat_id": chat_id, "message_id": None} for chat_id in get_summary_chat_ids()]
+        if not refs:
+            return "no_recipients", None
+
+        errors: list[str] = []
+        sent_count = 0
+        for ref in refs:
+            try:
+                kwargs: dict[str, Any] = {
+                    "chat_id": ref["chat_id"],
+                    "audio": FSInputFile(str(file_path)),
+                    "caption": caption,
+                    "parse_mode": ParseMode.HTML,
+                }
+                if ref.get("message_id"):
+                    kwargs["reply_to_message_id"] = ref["message_id"]
+                await bot.send_audio(**kwargs)
+                sent_count += 1
+            except Exception as exc:  # noqa: BLE001
+                errors.append(f"{ref.get('chat_id')}: {str(exc)}")
+
+        if sent_count and errors:
+            return "partial", "; ".join(errors)
+        if sent_count:
+            return "sent", None
+        return "error", "; ".join(errors) or "no_audio_sent"
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Telegram inbound recording send failed session=%s path=%s: %s", session_id, local_path, str(exc))
+        return "error", str(exc)
+    finally:
+        db.close()
+
+
 async def send_to_google_sheets(payload: dict[str, Any]) -> tuple[str, Optional[str]]:
     if not GOOGLE_APPS_SCRIPT_WEBHOOK_URL:
         return "skipped_no_url", None
@@ -1470,6 +1582,27 @@ async def persist_and_send_outbound_recording(task_id: int, session_id: str, url
         error_text,
     )
     await notify_outbound_task(task_id, f"Запись не скачалась: {error_text or status_ru(status)}")
+
+
+async def persist_and_send_inbound_recording(session_id: str, url: str, reply_refs: Optional[list[dict[str, Any]]] = None):
+    status, local_path, error_text = await persist_recording_download(session_id, url)
+    if local_path:
+        send_status, send_error = await send_inbound_recording(session_id, local_path, reply_refs)
+        if send_error:
+            logger.warning(
+                "Inbound recording send failed session=%s status=%s error=%s",
+                session_id,
+                send_status,
+                send_error,
+            )
+        return
+
+    logger.warning(
+        "Inbound recording download failed session=%s status=%s error=%s",
+        session_id,
+        status,
+        error_text,
+    )
 
 
 async def cleanup_old_recordings():
@@ -2936,7 +3069,6 @@ async def finalize_call(
 
     recording_download_status = None
     recording_download_error = None
-    local_recording_path = None
     recording_url_for_download = payload.recording_url or db_call.recording_url
     if recording_url_for_download:
         if payload.outbound_task_id:
@@ -2949,17 +3081,9 @@ async def finalize_call(
                 )
             )
         else:
-            recording_download_status, local_recording_path, recording_download_error = await persist_recording_download(
-                payload.session_id,
-                recording_url_for_download,
-            )
-            if local_recording_path:
-                db_call.local_recording_path = local_recording_path
-                db_call.recording_status = recording_download_status
-                db_call.last_error = None
-                db_call.updated_at = datetime.utcnow()
-                db.commit()
+            recording_download_status = "scheduled"
 
+    inbound_recording_reply_refs: list[dict[str, Any]] = []
     if is_diagnostic_finalize(payload):
         admin_status, admin_error = "skipped_diagnostic", None
         summary_status, summary_error = "skipped_diagnostic", None
@@ -2967,13 +3091,10 @@ async def finalize_call(
         admin_status, admin_error = "skipped_outbound_task", None
         summary_status, summary_error = "skipped_outbound_task", None
     else:
-        admin_status, admin_error = await send_telegram_text(
-            get_admin_chat_ids(),
-            db_call.admin_report_html or render_admin_report(payload),
-        )
-        summary_status, summary_error = await send_telegram_text(
+        admin_status, admin_error = "skipped_inbound_concise", None
+        summary_status, summary_error, inbound_recording_reply_refs = await send_telegram_text_with_refs(
             get_summary_chat_ids(),
-            db_call.summary_report_html or render_summary_report(payload),
+            render_inbound_summary_report(payload),
         )
 
     sheets_payload = payload.model_dump(mode="json")
@@ -2996,6 +3117,18 @@ async def finalize_call(
     if payload.outbound_task_id:
         await notify_outbound_task(payload.outbound_task_id, "Звонок завершен")
         recording_send_status = "scheduled" if recording_url_for_download else "skipped_no_recording_url"
+    elif not is_diagnostic_finalize(payload):
+        if recording_url_for_download:
+            recording_send_status = "scheduled"
+            asyncio.create_task(
+                persist_and_send_inbound_recording(
+                    payload.session_id,
+                    recording_url_for_download,
+                    inbound_recording_reply_refs,
+                )
+            )
+        else:
+            recording_send_status = "skipped_no_recording_url"
 
     return {
         "status": "success",
