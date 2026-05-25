@@ -455,6 +455,9 @@ function DashboardPage({
                     <i className={`status-dot ${campaign.status === "active" ? "good" : "muted"}`} />
                     {statusRu(campaign.status)}
                   </small>
+                  <span className="campaign-progress" aria-label={`Прогресс ${campaignProgress(campaign)}%`}>
+                    <span style={{ width: `${campaignProgress(campaign)}%` }} />
+                  </span>
                 </span>
                 <span className="campaign-metrics">
                   <span>
