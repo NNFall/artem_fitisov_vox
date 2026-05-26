@@ -56,6 +56,24 @@ class Call(Base):
     local_recording_path = Column(String, nullable=True)
     recording_error = Column(Text, nullable=True)
 
+    transcription_status = Column(String, nullable=True)
+    transcription_provider = Column(String, nullable=True)
+    transcription_model = Column(String, nullable=True)
+    transcription_id = Column(String, nullable=True)
+    transcription_text = Column(Text, nullable=True)
+    transcription_raw_json = Column(Text, nullable=True)
+    transcription_error = Column(Text, nullable=True)
+    transcription_started_at = Column(DateTime, nullable=True)
+    transcription_finished_at = Column(DateTime, nullable=True)
+
+    analysis_status = Column(String, nullable=True)
+    analysis_provider = Column(String, nullable=True)
+    analysis_model = Column(String, nullable=True)
+    analysis_raw_json = Column(Text, nullable=True)
+    analysis_error = Column(Text, nullable=True)
+    analysis_started_at = Column(DateTime, nullable=True)
+    analysis_finished_at = Column(DateTime, nullable=True)
+
     usage_json = Column(Text, nullable=True)
     summary_fields_json = Column(Text, nullable=True)
     dialogue_items_json = Column(Text, nullable=True)
@@ -106,6 +124,20 @@ class Call(Base):
             "recording_url": self.recording_url,
             "local_recording_path": self.local_recording_path,
             "recording_error": self.recording_error,
+            "transcription_status": self.transcription_status,
+            "transcription_provider": self.transcription_provider,
+            "transcription_model": self.transcription_model,
+            "transcription_id": self.transcription_id,
+            "transcription_text": self.transcription_text,
+            "transcription_error": self.transcription_error,
+            "transcription_started_at": self.transcription_started_at.isoformat() if self.transcription_started_at else None,
+            "transcription_finished_at": self.transcription_finished_at.isoformat() if self.transcription_finished_at else None,
+            "analysis_status": self.analysis_status,
+            "analysis_provider": self.analysis_provider,
+            "analysis_model": self.analysis_model,
+            "analysis_error": self.analysis_error,
+            "analysis_started_at": self.analysis_started_at.isoformat() if self.analysis_started_at else None,
+            "analysis_finished_at": self.analysis_finished_at.isoformat() if self.analysis_finished_at else None,
             "telegram_admin_status": self.telegram_admin_status,
             "telegram_summary_status": self.telegram_summary_status,
             "google_sheets_status": self.google_sheets_status,
@@ -301,6 +333,22 @@ SQLITE_CALLS_COLUMNS = {
     "dialogue_text": "TEXT",
     "recording_status": "TEXT",
     "recording_error": "TEXT",
+    "transcription_status": "TEXT",
+    "transcription_provider": "TEXT",
+    "transcription_model": "TEXT",
+    "transcription_id": "TEXT",
+    "transcription_text": "TEXT",
+    "transcription_raw_json": "TEXT",
+    "transcription_error": "TEXT",
+    "transcription_started_at": "DATETIME",
+    "transcription_finished_at": "DATETIME",
+    "analysis_status": "TEXT",
+    "analysis_provider": "TEXT",
+    "analysis_model": "TEXT",
+    "analysis_raw_json": "TEXT",
+    "analysis_error": "TEXT",
+    "analysis_started_at": "DATETIME",
+    "analysis_finished_at": "DATETIME",
     "usage_json": "TEXT",
     "summary_fields_json": "TEXT",
     "dialogue_items_json": "TEXT",

@@ -68,6 +68,17 @@ const statusLabels: Record<string, string> = {
   recording_ready: "Запись готова",
   ready: "Запись готова",
   recording_failed: "Ошибка записи",
+  transcription_waiting_recording: "Ждет запись",
+  transcription_started: "Идет расшифровка",
+  transcription_completed: "Расшифровка готова",
+  transcription_failed: "Ошибка расшифровки",
+  skipped_no_recording: "Нет записи",
+  skipped_no_assemblyai_key: "Нет ключа AssemblyAI",
+  analysis_started: "Собирается summary",
+  analysis_completed: "Summary готово",
+  analysis_failed: "Ошибка summary",
+  analysis_skipped: "AI-анализ пропущен",
+  skipped_no_gemini_key: "Нет ключа Gemini",
   not_started: "Запись не создавалась",
   download_error: "Запись не скачалась",
   requested_not_confirmed: "Запись запрошена",
@@ -101,9 +112,9 @@ function statusRu(value?: string | null) {
 }
 
 function statusTone(value?: string | null) {
-  if (["active", "completed", "finalized", "call_disconnected", "hangup", "client_hangup", "ok", "recording_ready", "ready", "attended", "arrived", "yes"].includes(value || "")) return "good";
-  if (["failed", "call_failed", "call_timeout", "dial_error", "max_call_duration", "error", "recording_failed", "download_error", "not_attended", "no_show", "no"].includes(value || "")) return "bad";
-  if (["started", "starting", "in_progress", "queued", "scheduled", "retry_wait"].includes(value || "")) return "busy";
+  if (["active", "completed", "finalized", "call_disconnected", "hangup", "client_hangup", "ok", "recording_ready", "ready", "transcription_completed", "analysis_completed", "attended", "arrived", "yes"].includes(value || "")) return "good";
+  if (["failed", "call_failed", "call_timeout", "dial_error", "max_call_duration", "error", "recording_failed", "download_error", "transcription_failed", "analysis_failed", "skipped_no_assemblyai_key", "skipped_no_gemini_key", "not_attended", "no_show", "no"].includes(value || "")) return "bad";
+  if (["started", "starting", "in_progress", "queued", "scheduled", "retry_wait", "transcription_started", "analysis_started", "transcription_waiting_recording"].includes(value || "")) return "busy";
   return "muted";
 }
 
@@ -989,6 +1000,12 @@ function CallDetail({
           </div>
           <div className="object-actions">
             <span className={`direction-pill ${direction.type}`}><DirectionIcon size={15} />{direction.label}</span>
+            {call.transcription_status && (
+              <span className={`status-pill ${statusTone(call.transcription_status)}`}>{statusRu(call.transcription_status)}</span>
+            )}
+            {call.analysis_status && (
+              <span className={`status-pill ${statusTone(call.analysis_status)}`}>{statusRu(call.analysis_status)}</span>
+            )}
             <button type="button" className="action-button secondary" onClick={() => onOpenHistory(callPhone(call), callName(call))}>
               <Clock3 size={17} />
               <span>История клиента</span>
@@ -1007,6 +1024,8 @@ function CallDetail({
           <ResultLine label="Длительность" value={formatDuration(call.duration)} />
           <ResultLine label="Следующий шаг" value={call.next_step} />
           <ResultLine label="Статус записи" value={statusRu(call.recording_status)} />
+          <ResultLine label="Расшифровка" value={statusRu(call.transcription_status)} />
+          <ResultLine label="AI-сводка" value={statusRu(call.analysis_status)} />
         </div>
 
         <section className="detail-section">
@@ -1047,6 +1066,8 @@ function CallDetail({
             <ResultLine label="Итог" value={call.outcome || statusRu(call.status)} />
             <ResultLine label="Следующий шаг" value={call.next_step} />
             <ResultLine label="Кратко" value={call.summary || call.outcome} />
+            {call.transcription_error && <ResultLine label="Ошибка расшифровки" value={call.transcription_error} />}
+            {call.analysis_error && <ResultLine label="Ошибка AI-сводки" value={call.analysis_error} />}
           </div>
         </section>
 

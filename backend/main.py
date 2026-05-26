@@ -89,6 +89,22 @@ WEB_CORS_ORIGINS = [
     ).split(",")
     if item.strip()
 ]
+ASSEMBLYAI_API_KEY = os.getenv("ASSEMBLYAI_API_KEY", "").strip()
+ASSEMBLYAI_BASE_URL = os.getenv("ASSEMBLYAI_BASE_URL", "https://api.assemblyai.com").strip().rstrip("/")
+ASSEMBLYAI_SPEECH_MODEL = os.getenv("ASSEMBLYAI_SPEECH_MODEL", "universal-2").strip() or "universal-2"
+ASSEMBLYAI_LANGUAGE_DETECTION = os.getenv("ASSEMBLYAI_LANGUAGE_DETECTION", "true").lower() not in {"0", "false", "no", "off"}
+ASSEMBLYAI_SPEAKER_LABELS = os.getenv("ASSEMBLYAI_SPEAKER_LABELS", "true").lower() not in {"0", "false", "no", "off"}
+ASSEMBLYAI_MULTICHANNEL = os.getenv("ASSEMBLYAI_MULTICHANNEL", "false").lower() in {"1", "true", "yes", "on"}
+ASSEMBLYAI_POLL_INTERVAL_SECONDS = max(1, int(os.getenv("ASSEMBLYAI_POLL_INTERVAL_SECONDS", "3")))
+ASSEMBLYAI_TIMEOUT_SECONDS = max(30, int(os.getenv("ASSEMBLYAI_TIMEOUT_SECONDS", "600")))
+GEMINI_API_KEY = (
+    os.getenv("GEMINI_API_KEY", "").strip()
+    or os.getenv("GOOGLE_AI_API_KEY", "").strip()
+    or os.getenv("GOOGLE_API_KEY", "").strip()
+)
+GEMINI_SUMMARY_MODEL = os.getenv("GEMINI_SUMMARY_MODEL", "gemini-2.5-flash-lite").strip() or "gemini-2.5-flash-lite"
+GEMINI_API_BASE_URL = os.getenv("GEMINI_API_BASE_URL", "https://generativelanguage.googleapis.com").strip().rstrip("/")
+POST_CALL_ANALYSIS_ENABLED = os.getenv("POST_CALL_ANALYSIS_ENABLED", "true").lower() not in {"0", "false", "no", "off"}
 
 RECORDINGS_DIR.mkdir(parents=True, exist_ok=True)
 IMPORTS_DIR.mkdir(parents=True, exist_ok=True)
@@ -929,6 +945,17 @@ STATUS_RU = {
     "call_disconnected": "звонок завершен",
     "dial_error": "ошибка набора",
     "empty_call_target": "не передан номер",
+    "transcription_waiting_recording": "жду запись для расшифровки",
+    "transcription_started": "идет расшифровка диалога",
+    "transcription_completed": "расшифровка диалога готова",
+    "transcription_failed": "ошибка расшифровки диалога",
+    "analysis_started": "собираю точное summary диалога",
+    "analysis_completed": "точное summary готово",
+    "analysis_failed": "ошибка сборки summary",
+    "analysis_skipped": "AI-анализ пропущен",
+    "skipped_no_recording": "нет записи для расшифровки",
+    "skipped_no_assemblyai_key": "не задан ключ AssemblyAI",
+    "skipped_no_gemini_key": "не задан ключ Gemini",
     "no_gemini_key": "не задан ключ ИИ",
     "gemini_create_error": "ошибка подключения ИИ",
 }
@@ -1005,6 +1032,17 @@ STATUS_LABELS = {
     "recording_requested": "Запись разговора запрошена",
     "recording_ready": "Запись разговора готова",
     "recording_failed": "Ошибка записи разговора",
+    "transcription_waiting_recording": "Жду запись для расшифровки",
+    "transcription_started": "Идет расшифровка диалога",
+    "transcription_completed": "Расшифровка диалога готова",
+    "transcription_failed": "Ошибка расшифровки диалога",
+    "analysis_started": "Собираю точное summary диалога",
+    "analysis_completed": "Точное summary готово",
+    "analysis_failed": "Ошибка сборки summary",
+    "analysis_skipped": "AI-анализ пропущен",
+    "skipped_no_recording": "Нет записи для расшифровки",
+    "skipped_no_assemblyai_key": "Не задан ключ AssemblyAI",
+    "skipped_no_gemini_key": "Не задан ключ Gemini",
     "gemini_warmup_start": "Подключаю AI",
     "gemini_ready": "AI подключен",
     "gemini_error": "Ошибка AI",
@@ -1476,6 +1514,500 @@ async def send_to_google_sheets(payload: dict[str, Any]) -> tuple[str, Optional[
     return "error", last_error or "sync_failed"
 
 
+def call_to_finalize_payload_dict(db_call: Call) -> dict[str, Any]:
+    return {
+        "session_id": db_call.voximplant_session_id,
+        "project": db_call.project,
+        "script_name": db_call.script_name,
+        "outbound_task_id": db_call.outbound_task_id,
+        "campaign_id": db_call.campaign_id,
+        "exported_at_utc": db_call.exported_at.isoformat() if db_call.exported_at else None,
+        "finalization_reason": db_call.status,
+        "model": db_call.model,
+        "caller_phone": db_call.caller_phone,
+        "client_phone": db_call.client_phone,
+        "client_name": db_call.client_name,
+        "call_duration_sec": db_call.duration,
+        "telephony_cost_rub": db_call.telephony_cost_rub,
+        "websocket_duration_sec": db_call.websocket_duration_sec,
+        "websocket_cost_rub": db_call.websocket_cost_rub,
+        "voximplant_total_rub": db_call.voximplant_total_rub,
+        "ai_cost_usd": db_call.ai_cost_usd,
+        "ai_cost_rub": db_call.ai_cost_rub,
+        "total_cost_rub": db_call.total_cost_rub,
+        "summary": db_call.summary,
+        "call_goal": db_call.call_goal,
+        "manager_offer": db_call.manager_offer,
+        "outcome": db_call.outcome,
+        "next_step": db_call.next_step,
+        "dialogue_text": db_call.dialogue_text,
+        "recording_status": db_call.recording_status,
+        "recording_url": db_call.recording_url,
+        "recording_error": db_call.recording_error,
+        "usage": json_dict(db_call.usage_json),
+        "summary_fields": json_dict(db_call.summary_fields_json),
+        "dialogue_items": [],
+        "post_processing": {
+            "transcription_status": db_call.transcription_status,
+            "transcription_provider": db_call.transcription_provider,
+            "transcription_model": db_call.transcription_model,
+            "analysis_status": db_call.analysis_status,
+            "analysis_provider": db_call.analysis_provider,
+            "analysis_model": db_call.analysis_model,
+        },
+    }
+
+
+def log_call_processing_event(
+    db: Session,
+    db_call: Call,
+    stage: str,
+    status: Optional[str] = None,
+    message: Optional[str] = None,
+    payload: Optional[dict[str, Any]] = None,
+):
+    db.add(
+        OutboundEvent(
+            campaign_id=db_call.campaign_id,
+            task_id=db_call.outbound_task_id,
+            session_id=db_call.voximplant_session_id,
+            phone=normalize_phone(db_call.client_phone or db_call.caller_phone),
+            stage=stage,
+            status=status,
+            message=message,
+            payload_json=to_json_text(payload or {}),
+            created_at=datetime.utcnow(),
+        )
+    )
+
+
+def format_assembly_transcript(result: dict[str, Any]) -> str:
+    utterances = result.get("utterances")
+    if isinstance(utterances, list) and utterances:
+        lines: list[str] = []
+        for item in utterances:
+            if not isinstance(item, dict):
+                continue
+            text = safe_text(item.get("text")).strip()
+            if not text:
+                continue
+            speaker = safe_text(item.get("speaker")).strip() or "unknown"
+            lines.append(f"Speaker {speaker}: {text}")
+        if lines:
+            return "\n".join(lines)
+
+    return safe_text(result.get("text")).strip()
+
+
+def parse_json_model_response(text: str) -> dict[str, Any]:
+    stripped = safe_text(text).strip()
+    if not stripped:
+        return {}
+    try:
+        parsed = json.loads(stripped)
+        return parsed if isinstance(parsed, dict) else {}
+    except json.JSONDecodeError:
+        pass
+
+    match = re.search(r"\{.*\}", stripped, flags=re.DOTALL)
+    if not match:
+        return {}
+    try:
+        parsed = json.loads(match.group(0))
+    except json.JSONDecodeError:
+        return {}
+    return parsed if isinstance(parsed, dict) else {}
+
+
+async def assemblyai_upload_file(file_path: Path) -> str:
+    headers = {"authorization": ASSEMBLYAI_API_KEY}
+    timeout = aiohttp.ClientTimeout(total=180)
+    async with aiohttp.ClientSession(timeout=timeout) as session:
+        with file_path.open("rb") as audio_file:
+            async with session.post(f"{ASSEMBLYAI_BASE_URL}/v2/upload", headers=headers, data=audio_file) as response:
+                response_text = await response.text()
+                if response.status >= 400:
+                    raise RuntimeError(f"AssemblyAI upload HTTP {response.status}: {response_text[:1000]}")
+                payload = json.loads(response_text)
+    upload_url = safe_text(payload.get("upload_url")).strip()
+    if not upload_url:
+        raise RuntimeError("AssemblyAI upload response has no upload_url")
+    return upload_url
+
+
+async def assemblyai_transcribe_file(file_path: Path) -> dict[str, Any]:
+    upload_url = await assemblyai_upload_file(file_path)
+    headers = {"authorization": ASSEMBLYAI_API_KEY, "content-type": "application/json"}
+    transcript_payload: dict[str, Any] = {
+        "audio_url": upload_url,
+        "speech_models": [ASSEMBLYAI_SPEECH_MODEL],
+    }
+    if ASSEMBLYAI_LANGUAGE_DETECTION:
+        transcript_payload["language_detection"] = True
+    if ASSEMBLYAI_SPEAKER_LABELS:
+        transcript_payload["speaker_labels"] = True
+    if ASSEMBLYAI_MULTICHANNEL:
+        transcript_payload["multichannel"] = True
+
+    timeout = aiohttp.ClientTimeout(total=ASSEMBLYAI_TIMEOUT_SECONDS + 60)
+    async with aiohttp.ClientSession(timeout=timeout) as session:
+        async with session.post(f"{ASSEMBLYAI_BASE_URL}/v2/transcript", headers=headers, json=transcript_payload) as response:
+            response_text = await response.text()
+            if response.status >= 400:
+                raise RuntimeError(f"AssemblyAI transcript HTTP {response.status}: {response_text[:1000]}")
+            created = json.loads(response_text)
+
+        transcript_id = safe_text(created.get("id")).strip()
+        if not transcript_id:
+            raise RuntimeError("AssemblyAI transcript response has no id")
+
+        started_at = time.monotonic()
+        while True:
+            async with session.get(f"{ASSEMBLYAI_BASE_URL}/v2/transcript/{transcript_id}", headers=headers) as response:
+                response_text = await response.text()
+                if response.status >= 400:
+                    raise RuntimeError(f"AssemblyAI polling HTTP {response.status}: {response_text[:1000]}")
+                result = json.loads(response_text)
+
+            status = safe_text(result.get("status")).strip()
+            if status == "completed":
+                return result
+            if status == "error":
+                raise RuntimeError(safe_text(result.get("error")).strip() or "AssemblyAI transcription failed")
+            if time.monotonic() - started_at > ASSEMBLYAI_TIMEOUT_SECONDS:
+                raise RuntimeError("AssemblyAI transcription timeout")
+            await asyncio.sleep(ASSEMBLYAI_POLL_INTERVAL_SECONDS)
+
+
+def build_gemini_analysis_prompt(context: dict[str, Any], transcript: str) -> str:
+    return f"""
+Ты анализируешь звонок голосового AI-агента Екатерины по базе форума Amix.
+
+Задача: по точной расшифровке собрать управленческую сводку без фантазий. Если информации нет, оставь поле пустым.
+
+Контекст звонка:
+{json.dumps(context, ensure_ascii=False, indent=2)}
+
+Расшифровка:
+{transcript[:60000]}
+
+Верни только JSON:
+- summary: кратко 1-3 предложения по сути разговора;
+- outcome: итог звонка;
+- next_step: что делать дальше менеджеру;
+- call_goal: запрос/интерес клиента;
+- manager_offer: что Екатерина предложила или объяснила;
+- summary_fields: объект с ключами activity_type, is_decision_maker, average_check, traffic_source, bot_impression, manager_comment.
+""".strip()
+
+
+def gemini_response_schema() -> dict[str, Any]:
+    return {
+        "type": "OBJECT",
+        "properties": {
+            "summary": {"type": "STRING"},
+            "outcome": {"type": "STRING"},
+            "next_step": {"type": "STRING"},
+            "call_goal": {"type": "STRING"},
+            "manager_offer": {"type": "STRING"},
+            "summary_fields": {
+                "type": "OBJECT",
+                "properties": {
+                    "activity_type": {"type": "STRING"},
+                    "is_decision_maker": {"type": "STRING"},
+                    "average_check": {"type": "STRING"},
+                    "traffic_source": {"type": "STRING"},
+                    "bot_impression": {"type": "STRING"},
+                    "manager_comment": {"type": "STRING"},
+                },
+            },
+        },
+    }
+
+
+async def gemini_analyze_transcript(context: dict[str, Any], transcript: str) -> dict[str, Any]:
+    prompt = build_gemini_analysis_prompt(context, transcript)
+    url = f"{GEMINI_API_BASE_URL}/v1beta/models/{GEMINI_SUMMARY_MODEL}:generateContent?key={GEMINI_API_KEY}"
+    payload = {
+        "contents": [{"role": "user", "parts": [{"text": prompt}]}],
+        "generationConfig": {
+            "temperature": 0.1,
+            "responseMimeType": "application/json",
+            "responseSchema": gemini_response_schema(),
+        },
+    }
+    timeout = aiohttp.ClientTimeout(total=90)
+    async with aiohttp.ClientSession(timeout=timeout) as session:
+        async with session.post(url, json=payload) as response:
+            response_text = await response.text()
+            if response.status >= 400:
+                raise RuntimeError(f"Gemini HTTP {response.status}: {response_text[:1000]}")
+            result = json.loads(response_text)
+
+    parts = (
+        result.get("candidates", [{}])[0]
+        .get("content", {})
+        .get("parts", [])
+    )
+    text = "\n".join(safe_text(part.get("text")) for part in parts if isinstance(part, dict)).strip()
+    parsed = parse_json_model_response(text)
+    if not parsed:
+        raise RuntimeError("Gemini returned no JSON payload")
+    parsed["_raw_response"] = result
+    return parsed
+
+
+def build_call_analysis_context(db: Session, db_call: Call) -> dict[str, Any]:
+    context = {
+        "call": call_to_finalize_payload_dict(db_call),
+        "contact": None,
+        "campaign": None,
+    }
+    if db_call.outbound_task_id:
+        task = db.query(OutboundTask).filter(OutboundTask.id == db_call.outbound_task_id).first()
+        if task:
+            contact = db.query(OutboundContact).filter(OutboundContact.id == task.contact_id).first()
+            campaign = db.query(Campaign).filter(Campaign.id == task.campaign_id).first()
+            context["task"] = task_context_brief(task, contact, campaign)
+            context["contact"] = web_contact_payload(contact, task) if contact else None
+            context["campaign"] = campaign.as_dict() if campaign else None
+    elif db_call.campaign_id:
+        campaign = db.query(Campaign).filter(Campaign.id == db_call.campaign_id).first()
+        context["campaign"] = campaign.as_dict() if campaign else None
+    return context
+
+
+def apply_gemini_analysis_result(db_call: Call, result: dict[str, Any]):
+    for field_name in ("summary", "call_goal", "manager_offer", "outcome", "next_step"):
+        value = safe_text(result.get(field_name)).strip()
+        if value:
+            setattr(db_call, field_name, value)
+
+    existing_fields = json_dict(db_call.summary_fields_json)
+    incoming_fields = result.get("summary_fields")
+    if not isinstance(incoming_fields, dict):
+        incoming_fields = {}
+    for field_name in ("summary", "call_goal", "manager_offer", "outcome", "next_step"):
+        value = safe_text(result.get(field_name)).strip()
+        if value:
+            incoming_fields.setdefault(field_name, value)
+    merged_fields = {**existing_fields, **{key: value for key, value in incoming_fields.items() if value not in ("", None)}}
+    db_call.summary_fields_json = to_json_text(merged_fields)
+
+
+async def sync_call_to_google_sheets(session_id: str) -> tuple[str, Optional[str]]:
+    db = SessionLocal()
+    try:
+        db_call = db.query(Call).filter(Call.voximplant_session_id == session_id).first()
+        if not db_call:
+            return "skipped_call_not_found", None
+        payload = call_to_finalize_payload_dict(db_call)
+    finally:
+        db.close()
+
+    status, response_text = await send_to_google_sheets(payload)
+
+    db = SessionLocal()
+    try:
+        db_call = db.query(Call).filter(Call.voximplant_session_id == session_id).first()
+        if db_call:
+            db_call.google_sheets_status = status
+            db_call.google_sheets_response = response_text
+            if status == "error" and response_text:
+                db_call.last_error = response_text
+            db_call.updated_at = datetime.utcnow()
+            db.commit()
+    finally:
+        db.close()
+
+    return status, response_text
+
+
+async def notify_call_processing_status(session_id: str, text: str):
+    db = SessionLocal()
+    try:
+        db_call = db.query(Call).filter(Call.voximplant_session_id == session_id).first()
+        task_id = db_call.outbound_task_id if db_call else None
+    finally:
+        db.close()
+
+    if task_id:
+        await notify_outbound_task(task_id, text)
+
+
+async def process_call_analysis(session_id: str):
+    if not POST_CALL_ANALYSIS_ENABLED:
+        return
+
+    db = SessionLocal()
+    try:
+        db_call = db.query(Call).filter(Call.voximplant_session_id == session_id).first()
+        if not db_call:
+            return
+        if db_call.transcription_status == "running" or db_call.analysis_status == "running":
+            return
+        if db_call.transcription_status == "completed" and db_call.analysis_status == "completed":
+            return
+        local_recording_path = Path(safe_text(db_call.local_recording_path))
+        if not db_call.local_recording_path or not local_recording_path.exists():
+            db_call.transcription_status = "skipped_no_recording"
+            db_call.transcription_error = "local_recording_not_found"
+            db_call.updated_at = datetime.utcnow()
+            log_call_processing_event(db, db_call, "transcription_waiting_recording", "skipped_no_recording", "Нет локального файла записи")
+            db.commit()
+            return
+        if not ASSEMBLYAI_API_KEY:
+            db_call.transcription_status = "skipped_no_assemblyai_key"
+            db_call.transcription_provider = "assemblyai"
+            db_call.transcription_error = "ASSEMBLYAI_API_KEY is not configured"
+            db_call.updated_at = datetime.utcnow()
+            log_call_processing_event(db, db_call, "transcription_failed", "skipped_no_assemblyai_key", "Не задан ключ AssemblyAI")
+            db.commit()
+            return
+
+        context = build_call_analysis_context(db, db_call)
+        db_call.transcription_status = "running"
+        db_call.transcription_provider = "assemblyai"
+        db_call.transcription_model = ASSEMBLYAI_SPEECH_MODEL
+        db_call.transcription_error = None
+        db_call.transcription_started_at = datetime.utcnow()
+        db_call.updated_at = datetime.utcnow()
+        log_call_processing_event(db, db_call, "transcription_started", "running", "Идет расшифровка диалога")
+        db.commit()
+    finally:
+        db.close()
+
+    await notify_call_processing_status(session_id, "Идет расшифровка диалога")
+
+    try:
+        assembly_result = await assemblyai_transcribe_file(local_recording_path)
+        transcript_text = format_assembly_transcript(assembly_result)
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("AssemblyAI transcription failed session=%s", session_id)
+        db = SessionLocal()
+        try:
+            db_call = db.query(Call).filter(Call.voximplant_session_id == session_id).first()
+            if db_call:
+                db_call.transcription_status = "failed"
+                db_call.transcription_error = str(exc)
+                db_call.transcription_finished_at = datetime.utcnow()
+                db_call.updated_at = datetime.utcnow()
+                log_call_processing_event(db, db_call, "transcription_failed", "failed", str(exc))
+                db.commit()
+        finally:
+            db.close()
+        await notify_call_processing_status(session_id, f"Расшифровка не получилась: {exc}")
+        return
+
+    db = SessionLocal()
+    try:
+        db_call = db.query(Call).filter(Call.voximplant_session_id == session_id).first()
+        if not db_call:
+            return
+        db_call.transcription_status = "completed"
+        db_call.transcription_provider = "assemblyai"
+        db_call.transcription_model = ASSEMBLYAI_SPEECH_MODEL
+        db_call.transcription_id = safe_text(assembly_result.get("id")).strip() or None
+        db_call.transcription_text = transcript_text
+        db_call.transcription_raw_json = to_json_text(assembly_result)
+        db_call.transcription_error = None
+        db_call.transcription_finished_at = datetime.utcnow()
+        if transcript_text:
+            db_call.dialogue_text = transcript_text
+        db_call.updated_at = datetime.utcnow()
+        log_call_processing_event(db, db_call, "transcription_completed", "completed", "Расшифровка диалога готова")
+        db.commit()
+    finally:
+        db.close()
+
+    await notify_call_processing_status(session_id, "Расшифровка диалога готова, собираю точное summary")
+    await sync_call_to_google_sheets(session_id)
+
+    if not GEMINI_API_KEY:
+        db = SessionLocal()
+        try:
+            db_call = db.query(Call).filter(Call.voximplant_session_id == session_id).first()
+            if db_call:
+                db_call.analysis_status = "skipped_no_gemini_key"
+                db_call.analysis_provider = "google_gemini"
+                db_call.analysis_model = GEMINI_SUMMARY_MODEL
+                db_call.analysis_error = "GEMINI_API_KEY is not configured"
+                db_call.updated_at = datetime.utcnow()
+                log_call_processing_event(db, db_call, "analysis_skipped", "skipped_no_gemini_key", "Не задан ключ Gemini")
+                db.commit()
+        finally:
+            db.close()
+        await notify_call_processing_status(session_id, "Точная расшифровка готова, summary от Gemini пропущено: нет ключа")
+        return
+
+    db = SessionLocal()
+    try:
+        db_call = db.query(Call).filter(Call.voximplant_session_id == session_id).first()
+        if not db_call:
+            return
+        context = build_call_analysis_context(db, db_call)
+        db_call.analysis_status = "running"
+        db_call.analysis_provider = "google_gemini"
+        db_call.analysis_model = GEMINI_SUMMARY_MODEL
+        db_call.analysis_error = None
+        db_call.analysis_started_at = datetime.utcnow()
+        db_call.updated_at = datetime.utcnow()
+        log_call_processing_event(db, db_call, "analysis_started", "running", "Собираю точное summary диалога")
+        db.commit()
+    finally:
+        db.close()
+
+    try:
+        analysis_result = await gemini_analyze_transcript(context, transcript_text)
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("Gemini analysis failed session=%s", session_id)
+        db = SessionLocal()
+        try:
+            db_call = db.query(Call).filter(Call.voximplant_session_id == session_id).first()
+            if db_call:
+                db_call.analysis_status = "failed"
+                db_call.analysis_error = str(exc)
+                db_call.analysis_finished_at = datetime.utcnow()
+                db_call.updated_at = datetime.utcnow()
+                log_call_processing_event(db, db_call, "analysis_failed", "failed", str(exc))
+                db.commit()
+        finally:
+            db.close()
+        await notify_call_processing_status(session_id, f"Summary от Gemini не собралось: {exc}")
+        return
+
+    raw_response = analysis_result.pop("_raw_response", None)
+    db = SessionLocal()
+    try:
+        db_call = db.query(Call).filter(Call.voximplant_session_id == session_id).first()
+        if not db_call:
+            return
+        apply_gemini_analysis_result(db_call, analysis_result)
+        db_call.analysis_status = "completed"
+        db_call.analysis_provider = "google_gemini"
+        db_call.analysis_model = GEMINI_SUMMARY_MODEL
+        db_call.analysis_raw_json = to_json_text({"result": analysis_result, "raw_response": raw_response})
+        db_call.analysis_error = None
+        db_call.analysis_finished_at = datetime.utcnow()
+        db_call.updated_at = datetime.utcnow()
+        log_call_processing_event(db, db_call, "analysis_completed", "completed", "Точное summary готово")
+        db.commit()
+    finally:
+        db.close()
+
+    await sync_call_to_google_sheets(session_id)
+    await notify_call_processing_status(session_id, "Точное summary готово")
+
+
+def schedule_call_analysis(session_id: str):
+    if not POST_CALL_ANALYSIS_ENABLED:
+        return
+    try:
+        asyncio.create_task(process_call_analysis(session_id))
+    except RuntimeError:
+        logger.debug("No running event loop to schedule call analysis session=%s", session_id)
+
+
 def guess_recording_extension(url: str) -> str:
     parsed_path = urlparse(url).path.lower()
     for extension in (".mp3", ".wav", ".ogg", ".m4a"):
@@ -1555,6 +2087,8 @@ async def persist_recording_download(session_id: str, url: str) -> tuple[str, Op
             db_call.recording_status = status
         db_call.updated_at = datetime.utcnow()
         db.commit()
+        if local_path:
+            schedule_call_analysis(session_id)
         return status, local_path, error_text
     finally:
         db.close()
@@ -1675,7 +2209,8 @@ def fill_call_from_finalize(db_call: Call, payload: FinalizePayload):
     set_if_value(db_call, "manager_offer", payload.manager_offer)
     set_if_value(db_call, "outcome", payload.outcome)
     set_if_value(db_call, "next_step", payload.next_step)
-    set_if_value(db_call, "dialogue_text", payload.dialogue_text)
+    if db_call.transcription_status != "completed":
+        set_if_value(db_call, "dialogue_text", payload.dialogue_text)
 
     set_if_value(db_call, "recording_status", payload.recording_status)
     set_if_value(db_call, "recording_url", payload.recording_url)
@@ -3104,6 +3639,9 @@ async def finalize_call(
             )
         else:
             recording_download_status = "scheduled"
+    elif db_call.local_recording_path:
+        recording_download_status = "already_downloaded"
+        schedule_call_analysis(payload.session_id)
 
     inbound_recording_reply_refs: list[dict[str, Any]] = []
     if is_diagnostic_finalize(payload):

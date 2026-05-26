@@ -212,6 +212,105 @@ class WebApiTest(unittest.TestCase):
         finally:
             db.close()
 
+    def test_format_assembly_transcript_prefers_utterances(self):
+        transcript = self.main.format_assembly_transcript(
+            {
+                "text": "flat transcript",
+                "utterances": [
+                    {"speaker": "A", "text": "Hello, can I ask a few questions?"},
+                    {"speaker": "B", "text": "Yes, go ahead."},
+                ],
+            }
+        )
+
+        self.assertEqual(
+            transcript,
+            "Speaker A: Hello, can I ask a few questions?\nSpeaker B: Yes, go ahead.",
+        )
+
+    def test_post_call_analysis_updates_transcript_summary_and_sheets_payload(self):
+        recording_path = Path(self.tmpdir.name) / "analysis-session-1.mp3"
+        recording_path.write_bytes(b"fake audio bytes")
+
+        db = self.database.SessionLocal()
+        try:
+            db.add(
+                self.database.Call(
+                    voximplant_session_id="analysis-session-1",
+                    client_phone="79958407752",
+                    client_name="Nikita",
+                    status="finalized",
+                    summary="raw agent summary",
+                    outcome="raw outcome",
+                    next_step="raw next step",
+                    dialogue_text="raw dialogue",
+                    local_recording_path=str(recording_path),
+                    recording_url="https://voximplant.example/analysis-session-1.mp3",
+                    recording_status="downloaded",
+                )
+            )
+            db.commit()
+        finally:
+            db.close()
+
+        assembly_payload = {
+            "id": "assembly-transcript-1",
+            "text": "Speaker A asks. Speaker B answers.",
+            "utterances": [
+                {"speaker": "A", "text": "Good afternoon, may I ask a few questions?"},
+                {"speaker": "B", "text": "Yes."},
+            ],
+        }
+        gemini_result = {
+            "summary": "The client agreed to answer the questions.",
+            "outcome": "Reached",
+            "next_step": "Send details to the manager.",
+            "call_goal": "Qualify forum participant",
+            "manager_offer": "AI voice assistant for business calls",
+            "summary_fields": {
+                "activity_type": "Furniture production",
+                "is_decision_maker": "Yes",
+            },
+        }
+
+        with (
+            patch.object(self.main, "ASSEMBLYAI_API_KEY", "test-assembly-key"),
+            patch.object(self.main, "GEMINI_API_KEY", "test-gemini-key"),
+            patch.object(self.main, "assemblyai_transcribe_file", new_callable=AsyncMock) as transcribe,
+            patch.object(self.main, "gemini_analyze_transcript", new_callable=AsyncMock) as analyze,
+            patch.object(self.main, "send_to_google_sheets", new_callable=AsyncMock) as send_sheets,
+        ):
+            transcribe.return_value = assembly_payload
+            analyze.return_value = gemini_result
+            send_sheets.return_value = ("sent", '{"ok":true}')
+
+            import asyncio
+
+            asyncio.run(self.main.process_call_analysis("analysis-session-1"))
+
+        db = self.database.SessionLocal()
+        try:
+            db_call = db.query(self.database.Call).filter(
+                self.database.Call.voximplant_session_id == "analysis-session-1"
+            ).first()
+            self.assertIsNotNone(db_call)
+            self.assertEqual(db_call.transcription_status, "completed")
+            self.assertEqual(db_call.transcription_id, "assembly-transcript-1")
+            self.assertIn("Speaker A: Good afternoon", db_call.dialogue_text)
+            self.assertEqual(db_call.analysis_status, "completed")
+            self.assertEqual(db_call.summary, "The client agreed to answer the questions.")
+            self.assertEqual(db_call.outcome, "Reached")
+            self.assertIn("Furniture production", db_call.summary_fields_json)
+        finally:
+            db.close()
+
+        self.assertEqual(send_sheets.await_count, 2)
+        sheets_payload = send_sheets.await_args.args[0]
+        self.assertEqual(sheets_payload["session_id"], "analysis-session-1")
+        self.assertEqual(sheets_payload["dialogue_text"], "Speaker A: Good afternoon, may I ask a few questions?\nSpeaker B: Yes.")
+        self.assertEqual(sheets_payload["summary"], "The client agreed to answer the questions.")
+        self.assertEqual(sheets_payload["summary_fields"]["activity_type"], "Furniture production")
+
 
 if __name__ == "__main__":
     unittest.main()
