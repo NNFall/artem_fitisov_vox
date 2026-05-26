@@ -67,6 +67,22 @@ class WebApiTest(unittest.TestCase):
         self.assertEqual(payload["calls"]["total"], 0)
         self.assertEqual(payload["worker"]["enabled"], False)
 
+    def test_telegram_send_only_mode_does_not_start_polling(self):
+        with (
+            patch.object(self.main, "TELEGRAM_POLLING_ENABLED", False),
+            patch.object(self.main, "bot", object()),
+            patch.object(self.main, "dispatcher", object()),
+        ):
+            self.assertFalse(self.main.should_start_telegram_polling())
+
+    def test_telegram_polling_mode_starts_when_bot_and_dispatcher_exist(self):
+        with (
+            patch.object(self.main, "TELEGRAM_POLLING_ENABLED", True),
+            patch.object(self.main, "bot", object()),
+            patch.object(self.main, "dispatcher", object()),
+        ):
+            self.assertTrue(self.main.should_start_telegram_polling())
+
     def test_upload_csv_creates_paused_campaign(self):
         self.login()
         response = self.client.post(

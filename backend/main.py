@@ -56,6 +56,7 @@ TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
 TELEGRAM_ADMIN_CHAT_ID = os.getenv("TELEGRAM_ADMIN_CHAT_ID", "").strip()
 TELEGRAM_ADMIN_IDS_STR = os.getenv("TELEGRAM_ADMIN_IDS", "")
 TELEGRAM_USER_CHAT_IDS_STR = os.getenv("TELEGRAM_USER_CHAT_IDS", "")
+TELEGRAM_POLLING_ENABLED = os.getenv("TELEGRAM_POLLING_ENABLED", "true").lower() not in {"0", "false", "no", "off"}
 GOOGLE_APPS_SCRIPT_WEBHOOK_URL = os.getenv("GOOGLE_APPS_SCRIPT_WEBHOOK_URL", "").strip()
 PUBLIC_BACKEND_URL = os.getenv("PUBLIC_BACKEND_URL", "").strip().rstrip("/")
 VOXIMPLANT_RULE_ID = os.getenv("VOXIMPLANT_RULE_ID", "").strip()
@@ -2907,6 +2908,10 @@ def setup_telegram_dispatcher():
     dispatcher.message.register(admin_only(tg_document), F.document)
 
 
+def should_start_telegram_polling() -> bool:
+    return TELEGRAM_POLLING_ENABLED and dispatcher is not None and bot is not None
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     global telegram_polling_task
@@ -2916,10 +2921,12 @@ async def lifespan(app: FastAPI):
     scheduler.add_job(process_outbound_queue, "interval", seconds=OUTBOUND_WORKER_INTERVAL_SECONDS)
     scheduler.start()
     setup_telegram_dispatcher()
-    if dispatcher is not None and bot is not None:
+    if should_start_telegram_polling():
         await configure_telegram_commands()
         telegram_polling_task = asyncio.create_task(dispatcher.start_polling(bot))
         logger.info("Telegram bot polling started")
+    elif bot is not None:
+        logger.info("Telegram bot is configured in send-only mode; polling disabled")
     yield
     logger.info("Artem Fitisov backend stopping")
     if telegram_polling_task:
