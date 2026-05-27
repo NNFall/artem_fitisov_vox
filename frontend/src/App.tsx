@@ -227,6 +227,24 @@ function callDirection(call: Call): { type: CallDirection; label: string; Icon: 
   return { type: "outgoing", label: "Исходящий", Icon: PhoneOutgoing };
 }
 
+function providerRu(value?: string | null) {
+  const provider = String(value || "").trim().toLowerCase();
+  if (!provider) return "";
+  if (provider === "assemblyai") return "AssemblyAI";
+  if (provider.includes("gemini") || provider.includes("google")) return "Gemini";
+  if (provider.includes("openai")) return "OpenAI";
+  return value || "";
+}
+
+function processingLabel(base: string, provider?: string | null) {
+  const providerName = providerRu(provider);
+  return providerName ? `${base} ${providerName}` : base;
+}
+
+function modelMeta(provider?: string | null, model?: string | null) {
+  return [providerRu(provider), model].filter(Boolean).join(" · ");
+}
+
 function normalizePhoneForCompare(value?: string | null) {
   return String(value || "").replace(/\D/g, "");
 }
@@ -283,6 +301,21 @@ function parseDialogue(text?: string | null, clientName?: string | null): Dialog
   });
 
   return turns;
+}
+
+function transcriptParagraphs(text?: string | null) {
+  const clean = String(text || "")
+    .replace(/\bSpeaker\s+[A-ZА-Я]\s*[:：]\s*/gi, "")
+    .replace(/\s+/g, " ")
+    .trim();
+  if (!clean) return [];
+
+  const sentences = clean.match(/[^.!?…]+[.!?…]+|[^.!?…]+$/g)?.map((item) => item.trim()).filter(Boolean) || [clean];
+  const paragraphs: string[] = [];
+  for (let index = 0; index < sentences.length; index += 2) {
+    paragraphs.push(sentences.slice(index, index + 2).join(" "));
+  }
+  return paragraphs;
 }
 
 function splitFacts(text?: string | null) {
@@ -1014,7 +1047,14 @@ function CallDetail({
   const recordingUrlMissing = !src && !externalRecordingUrl && ["ready", "recording_ready"].includes(call.recording_status || "");
   const direction = callDirection(call);
   const DirectionIcon = direction.Icon;
-  const dialogueTurns = parseDialogue(call.dialogue_text, call.client_name);
+  const dialogueText = call.transcription_text || call.dialogue_text || "";
+  const dialogueTurns = parseDialogue(dialogueText, call.client_name);
+  const dialogueSourceTitle = call.transcription_text
+    ? processingLabel("Расшифровка", call.transcription_provider)
+    : "Диалог агента";
+  const dialogueSourceMeta = call.transcription_text
+    ? modelMeta(call.transcription_provider, call.transcription_model)
+    : compactText(call.model, "Voximplant / Gemini");
 
   return (
     <div className="screen-stack enter">
@@ -1033,12 +1073,6 @@ function CallDetail({
           <div className="object-actions">
             {loading ? <span className="loading-chip"><RefreshCw size={15} className="spin" />Обновляю звонок</span> : null}
             <span className={`direction-pill ${direction.type}`}><DirectionIcon size={15} />{direction.label}</span>
-            {call.transcription_status && (
-              <span className={`status-pill ${statusTone(call.transcription_status)}`}>{statusRu(call.transcription_status)}</span>
-            )}
-            {call.analysis_status && (
-              <span className={`status-pill ${statusTone(call.analysis_status)}`}>{statusRu(call.analysis_status)}</span>
-            )}
             <button type="button" className="action-button secondary" onClick={() => onOpenHistory(callPhone(call), callName(call))}>
               <Clock3 size={17} />
               <span>История клиента</span>
@@ -1054,11 +1088,12 @@ function CallDetail({
 
         <div className="contact-facts call-facts">
           <ResultLine label="Тип звонка" value={direction.label} />
+          <ResultLine label="Статус звонка" value={statusRu(call.status)} />
           <ResultLine label="Длительность" value={formatDuration(call.duration)} />
           <ResultLine label="Следующий шаг" value={call.next_step} />
-          <ResultLine label="Статус записи" value={statusRu(call.recording_status)} />
-          <ResultLine label="Расшифровка" value={statusRu(call.transcription_status)} />
-          <ResultLine label="AI-сводка" value={statusRu(call.analysis_status)} />
+          <ResultLine label="Запись" value={statusRu(call.recording_status)} />
+          <ResultLine label={processingLabel("Расшифровка", call.transcription_provider)} value={statusRu(call.transcription_status)} />
+          <ResultLine label={processingLabel("AI-сводка", call.analysis_provider)} value={statusRu(call.analysis_status)} />
         </div>
 
         <section className="detail-section">
@@ -1105,17 +1140,61 @@ function CallDetail({
         </section>
 
         <section className="detail-section">
-          <h3>Диалог</h3>
-          <DialogueThread turns={dialogueTurns} />
+          <div className="section-title-row">
+            <div>
+              <h3>{dialogueSourceTitle}</h3>
+              <span>{dialogueSourceMeta}</span>
+            </div>
+            {call.transcription_status ? (
+              <span className={`status-pill ${statusTone(call.transcription_status)}`}>{statusRu(call.transcription_status)}</span>
+            ) : null}
+          </div>
+          <DialogueThread
+            turns={dialogueTurns}
+            rawText={dialogueText}
+            sourceTitle={dialogueSourceTitle}
+            sourceMeta={dialogueSourceMeta}
+          />
         </section>
       </section>
     </div>
   );
 }
 
-function DialogueThread({ turns }: { turns: DialogueTurn[] }) {
+function DialogueThread({
+  turns,
+  rawText,
+  sourceTitle,
+  sourceMeta,
+}: {
+  turns: DialogueTurn[];
+  rawText?: string | null;
+  sourceTitle: string;
+  sourceMeta?: string | null;
+}) {
   if (!turns.length) {
     return <EmptyBlock title="Диалог пока не сохранен" text="Когда сервер получит текст разговора, он появится здесь по репликам клиента и AI." compact />;
+  }
+
+  const structuredTurns = turns.filter((turn) => turn.role !== "unknown");
+  const shouldUseTranscriptPanel = structuredTurns.length < 2;
+  if (shouldUseTranscriptPanel) {
+    const paragraphs = transcriptParagraphs(rawText);
+    const note = sourceTitle.includes("AssemblyAI")
+      ? "AssemblyAI вернул этот фрагмент без надежного разделения по ролям, поэтому текст показан как единая расшифровка."
+      : "Роли собеседников в этом фрагменте не разделены автоматически, поэтому текст показан единым блоком.";
+    return (
+      <article className="transcript-panel">
+        <div className="transcript-head">
+          <span>Единая расшифровка</span>
+          <small>{sourceMeta || "Роли собеседников не разделены автоматически"}</small>
+        </div>
+        <div className="transcript-copy">
+          {paragraphs.map((paragraph, index) => <p key={`${paragraph}-${index}`}>{paragraph}</p>)}
+        </div>
+        <small className="transcript-note">{note}</small>
+      </article>
+    );
   }
 
   return (
