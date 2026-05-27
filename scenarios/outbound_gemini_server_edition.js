@@ -28,8 +28,8 @@ const NEXT_CALL_DELAY_MS = 1000;
 const CALL_TIMEOUT_MS = 45 * 1000;
 const MAX_CALL_DURATION_MS = 5 * 60 * 1000;
 const SUMMARY_REQUEST_TIMEOUT_MS = 15000;
-const INPUT_SILENCE_PROMPT_MS = 10 * 1000;
-const INPUT_SILENCE_HANGUP_MS = 30 * 1000;
+const INPUT_SILENCE_PROMPT_MS = 20 * 1000;
+const INPUT_SILENCE_HANGUP_MS = 40 * 1000;
 const INPUT_SILENCE_CHECK_INTERVAL_MS = 1000;
 const INPUT_SILENCE_FINAL_HANGUP_DELAY_MS = 3500;
 const TASK_CONTEXT_FETCH_TIMEOUT_MS = 3500;
@@ -726,17 +726,21 @@ VoxEngine.addEventListener(AppEvents.Started, async () => {
                 .join('\n');
         };
 
+        const hasReconnectDialogueHistory = () => {
+            ensureDialogueFinalized();
+            return session.dialogue.some((item) => normalizeText(item && item.text));
+        };
+
         const buildReconnectPrompt = () => {
             const recentDialogue = formatRecentDialogueText(12);
             return `Связь с AI только что временно оборвалась и восстановилась. НЕ начинай разговор заново. НЕ здоровайся заново. НЕ повторяй стартовую реплику про форум Amix.
 
 Клиент сейчас слышал обрыв, поэтому сначала коротко скажи: «Да, простите, кажется связь на секунду прервалась».
 
-Дальше продолжи строго с последнего незавершенного места. Если последний незавершенный вопрос был про оценку, повтори только его одной короткой фразой:
-«И последний короткий вопрос: оцените, пожалуйста, мою работу по 10-балльной шкале.»
+Дальше продолжи строго с последнего незавершенного места по последним репликам ниже. Не перескакивай к финальным вопросам и не придумывай, будто клиент уже ответил на предыдущие вопросы.
 
 Последние реплики до обрыва:
-${recentDialogue || 'Истории реплик нет. Просто извинись за обрыв и спроси последний незавершенный вопрос.'}`;
+${recentDialogue}`;
         };
 
         const getRecordingStatus = () => {
@@ -1160,6 +1164,17 @@ ${recentDialogue || 'Истории реплик нет. Просто извин
             }
         };
 
+        const restartOpeningAfterEarlyReconnect = (client) => {
+            session.startPromptSent = false;
+            session.geminiOutputConnected = false;
+            session.callerInputConnected = false;
+            session.openingGreetingDone = false;
+            session.openingUnlockTimer = clearTimer(session.openingUnlockTimer);
+            Logger.write('===RECONNECT_WITHOUT_DIALOGUE_RESTART_OPENING===');
+            sendStatus('reconnect_without_dialogue_restart_opening', 'AI переподключен до начала диалога, повторяю стартовую реплику', {}, session);
+            sendOpeningGreeting(client, 'reconnect_without_dialogue');
+        };
+
         const startGeminiWarmup = async (reason) => {
             if (session.geminiWarmupStarted || activeGeminiClient) return;
             session.geminiWarmupStarted = true;
@@ -1262,6 +1277,10 @@ ${recentDialogue || 'Истории реплик нет. Просто извин
                 Logger.write('===GEMINI_SETUP_COMPLETE===');
                 session.geminiReady = true;
                 if (session.startPromptSent) {
+                    if (!hasReconnectDialogueHistory()) {
+                        restartOpeningAfterEarlyReconnect(client);
+                        return;
+                    }
                     connectFullMediaAfterReconnect(client);
                     sendUserTextToModel(client, buildReconnectPrompt(), 'reconnect_prompt');
                     Logger.write('===RECONNECT_PROMPT_SENT===');

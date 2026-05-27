@@ -15,11 +15,16 @@ class OutboundSilenceWatchdogTest(unittest.TestCase):
             with self.subTest(scenario=scenario_path.name):
                 text = scenario_path.read_text(encoding="utf-8")
 
-                self.assertIn("INPUT_SILENCE_PROMPT_MS = 10 * 1000", text)
-                self.assertIn("INPUT_SILENCE_HANGUP_MS = 30 * 1000", text)
+                self.assertIn("INPUT_SILENCE_PROMPT_MS = 20 * 1000", text)
+                self.assertIn("INPUT_SILENCE_HANGUP_MS = 40 * 1000", text)
                 self.assertIn("startInputSilenceWatchdog", text)
                 self.assertIn("markInboundTranscriptActivity", text)
                 self.assertIn("finishAndContinue('input_silence_timeout', true)", text)
+                self.assertIn("hasReconnectDialogueHistory", text)
+                self.assertIn("RECONNECT_WITHOUT_DIALOGUE_RESTART_OPENING", text)
+                self.assertIn("if (!hasReconnectDialogueHistory())", text)
+                self.assertNotIn("Истории реплик нет. Просто извинись за обрыв", text)
+                self.assertNotIn("Если последний незавершенный вопрос был про оценку", text)
                 self.assertIn("Абонент молчит, завершаю звонок", text)
 
 
