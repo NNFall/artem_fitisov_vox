@@ -7,7 +7,7 @@ export default defineConfig({
     port: 5173,
     proxy: {
       "/web": {
-        target: "http://186.246.18.100:8002",
+        target: "http://186.246.18.100:8001",
         changeOrigin: true,
       },
     },

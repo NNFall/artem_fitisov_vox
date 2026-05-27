@@ -3,7 +3,7 @@ import type { Campaign, CampaignDetail, Contact, Dashboard, ImportResult, Call }
 const envBase = import.meta.env.VITE_API_BASE_URL as string | undefined;
 const defaultBase =
   window.location.port === "3002"
-    ? `${window.location.protocol}//${window.location.hostname}:8002`
+    ? `${window.location.protocol}//${window.location.hostname}:8001`
     : window.location.origin;
 
 export const API_BASE =
