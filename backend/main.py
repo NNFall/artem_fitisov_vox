@@ -95,7 +95,9 @@ ASSEMBLYAI_BASE_URL = os.getenv("ASSEMBLYAI_BASE_URL", "https://api.assemblyai.c
 ASSEMBLYAI_SPEECH_MODEL = os.getenv("ASSEMBLYAI_SPEECH_MODEL", "universal-2").strip() or "universal-2"
 ASSEMBLYAI_LANGUAGE_DETECTION = os.getenv("ASSEMBLYAI_LANGUAGE_DETECTION", "true").lower() not in {"0", "false", "no", "off"}
 ASSEMBLYAI_SPEAKER_LABELS = os.getenv("ASSEMBLYAI_SPEAKER_LABELS", "true").lower() not in {"0", "false", "no", "off"}
-ASSEMBLYAI_MULTICHANNEL = os.getenv("ASSEMBLYAI_MULTICHANNEL", "false").lower() in {"1", "true", "yes", "on"}
+ASSEMBLYAI_MULTICHANNEL = os.getenv("ASSEMBLYAI_MULTICHANNEL", "true").lower() in {"1", "true", "yes", "on"}
+ASSEMBLYAI_CLIENT_CHANNEL = os.getenv("ASSEMBLYAI_CLIENT_CHANNEL", "1").strip() or "1"
+ASSEMBLYAI_AI_CHANNEL = os.getenv("ASSEMBLYAI_AI_CHANNEL", "2").strip() or "2"
 ASSEMBLYAI_POLL_INTERVAL_SECONDS = max(1, int(os.getenv("ASSEMBLYAI_POLL_INTERVAL_SECONDS", "3")))
 ASSEMBLYAI_TIMEOUT_SECONDS = max(30, int(os.getenv("ASSEMBLYAI_TIMEOUT_SECONDS", "600")))
 GEMINI_API_KEY = (
@@ -1586,18 +1588,43 @@ def format_assembly_transcript(result: dict[str, Any]) -> str:
     utterances = result.get("utterances")
     if isinstance(utterances, list) and utterances:
         lines: list[str] = []
+        is_multichannel = bool(result.get("multichannel"))
         for item in utterances:
             if not isinstance(item, dict):
                 continue
             text = safe_text(item.get("text")).strip()
             if not text:
                 continue
-            speaker = safe_text(item.get("speaker")).strip() or "unknown"
-            lines.append(f"Speaker {speaker}: {text}")
+            if is_multichannel:
+                channel = safe_text(item.get("channel")).strip() or safe_text(item.get("speaker")).strip()
+                if channel == ASSEMBLYAI_AI_CHANNEL:
+                    label = "AI"
+                elif channel == ASSEMBLYAI_CLIENT_CHANNEL:
+                    label = "Client"
+                else:
+                    label = f"Channel {channel or 'unknown'}"
+            else:
+                speaker = safe_text(item.get("speaker")).strip() or "unknown"
+                label = f"Speaker {speaker}"
+            lines.append(f"{label}: {text}")
         if lines:
             return "\n".join(lines)
 
     return safe_text(result.get("text")).strip()
+
+
+def build_assemblyai_transcript_payload(audio_url: str) -> dict[str, Any]:
+    transcript_payload: dict[str, Any] = {
+        "audio_url": audio_url,
+        "speech_models": [ASSEMBLYAI_SPEECH_MODEL],
+    }
+    if ASSEMBLYAI_LANGUAGE_DETECTION:
+        transcript_payload["language_detection"] = True
+    if ASSEMBLYAI_MULTICHANNEL:
+        transcript_payload["multichannel"] = True
+    elif ASSEMBLYAI_SPEAKER_LABELS:
+        transcript_payload["speaker_labels"] = True
+    return transcript_payload
 
 
 def parse_json_model_response(text: str) -> dict[str, Any]:
@@ -1639,16 +1666,7 @@ async def assemblyai_upload_file(file_path: Path) -> str:
 async def assemblyai_transcribe_file(file_path: Path) -> dict[str, Any]:
     upload_url = await assemblyai_upload_file(file_path)
     headers = {"authorization": ASSEMBLYAI_API_KEY, "content-type": "application/json"}
-    transcript_payload: dict[str, Any] = {
-        "audio_url": upload_url,
-        "speech_models": [ASSEMBLYAI_SPEECH_MODEL],
-    }
-    if ASSEMBLYAI_LANGUAGE_DETECTION:
-        transcript_payload["language_detection"] = True
-    if ASSEMBLYAI_SPEAKER_LABELS:
-        transcript_payload["speaker_labels"] = True
-    if ASSEMBLYAI_MULTICHANNEL:
-        transcript_payload["multichannel"] = True
+    transcript_payload = build_assemblyai_transcript_payload(upload_url)
 
     timeout = aiohttp.ClientTimeout(total=ASSEMBLYAI_TIMEOUT_SECONDS + 60)
     async with aiohttp.ClientSession(timeout=timeout) as session:

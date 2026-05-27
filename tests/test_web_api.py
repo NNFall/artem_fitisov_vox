@@ -297,6 +297,38 @@ class WebApiTest(unittest.TestCase):
             "Speaker A: Hello, can I ask a few questions?\nSpeaker B: Yes, go ahead.",
         )
 
+    def test_format_assembly_transcript_maps_multichannel_roles(self):
+        transcript = self.main.format_assembly_transcript(
+            {
+                "multichannel": True,
+                "utterances": [
+                    {"speaker": "2", "channel": 2, "text": "Good afternoon, may I ask a few questions?"},
+                    {"speaker": "1", "channel": 1, "text": "Yes, go ahead."},
+                    {"speaker": "2", "channel": 2, "text": "Thank you."},
+                ],
+            }
+        )
+
+        self.assertEqual(
+            transcript,
+            "AI: Good afternoon, may I ask a few questions?\nClient: Yes, go ahead.\nAI: Thank you.",
+        )
+
+    def test_build_assemblyai_payload_prefers_multichannel_over_speaker_labels(self):
+        with (
+            patch.object(self.main, "ASSEMBLYAI_LANGUAGE_DETECTION", True),
+            patch.object(self.main, "ASSEMBLYAI_SPEECH_MODEL", "universal-2"),
+            patch.object(self.main, "ASSEMBLYAI_MULTICHANNEL", True),
+            patch.object(self.main, "ASSEMBLYAI_SPEAKER_LABELS", True),
+        ):
+            payload = self.main.build_assemblyai_transcript_payload("https://example.test/audio.mp3")
+
+        self.assertEqual(payload["audio_url"], "https://example.test/audio.mp3")
+        self.assertEqual(payload["speech_models"], ["universal-2"])
+        self.assertTrue(payload["language_detection"])
+        self.assertTrue(payload["multichannel"])
+        self.assertNotIn("speaker_labels", payload)
+
     def test_post_call_analysis_updates_transcript_summary_and_sheets_payload(self):
         recording_path = Path(self.tmpdir.name) / "analysis-session-1.mp3"
         recording_path.write_bytes(b"fake audio bytes")
