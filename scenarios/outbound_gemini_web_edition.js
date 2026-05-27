@@ -28,6 +28,10 @@ const NEXT_CALL_DELAY_MS = 1000;
 const CALL_TIMEOUT_MS = 45 * 1000;
 const MAX_CALL_DURATION_MS = 5 * 60 * 1000;
 const SUMMARY_REQUEST_TIMEOUT_MS = 15000;
+const INPUT_SILENCE_PROMPT_MS = 10 * 1000;
+const INPUT_SILENCE_HANGUP_MS = 30 * 1000;
+const INPUT_SILENCE_CHECK_INTERVAL_MS = 1000;
+const INPUT_SILENCE_FINAL_HANGUP_DELAY_MS = 3500;
 const TASK_CONTEXT_FETCH_TIMEOUT_MS = 3500;
 const WEBSOCKET_PRICE_PER_MINUTE_RUB = 0.5;
 const WS_RECONNECT_DELAY_MS = 1200;
@@ -574,6 +578,12 @@ VoxEngine.addEventListener(AppEvents.Started, async () => {
             openingGreetingDone: false,
             openingUnlockTimer: null,
             startPromptSent: false,
+            inputSilenceTimer: null,
+            inputSilenceFinalHangupTimer: null,
+            lastInboundTranscriptAtMs: 0,
+            silencePromptSent: false,
+            silencePromptSentAtMs: 0,
+            silenceFinalizing: false,
             usageStats: {
                 in_text: 0,
                 in_audio: 0,
@@ -621,6 +631,91 @@ VoxEngine.addEventListener(AppEvents.Started, async () => {
             return session.dialogue
                 .map((item) => `${item.role === 'user' ? 'Клиент' : 'AI'}: ${item.text}`)
                 .join('\n');
+        };
+
+        const stopInputSilenceWatchdog = () => {
+            session.inputSilenceTimer = clearTimer(session.inputSilenceTimer);
+            session.inputSilenceFinalHangupTimer = clearTimer(session.inputSilenceFinalHangupTimer);
+        };
+
+        const markInboundTranscriptActivity = () => {
+            session.lastInboundTranscriptAtMs = Date.now();
+            if (session.silencePromptSent) {
+                Logger.write('===INPUT_SILENCE_RESOLVED===');
+                sendStatus('input_silence_resolved', 'Абонент снова ответил', {}, session);
+            }
+            session.silencePromptSent = false;
+            session.silencePromptSentAtMs = 0;
+        };
+
+        const sendInputSilencePrompt = () => {
+            if (session.done || finishingCurrentCall || !activeGeminiClient || session.silencePromptSent) return;
+            session.silencePromptSent = true;
+            session.silencePromptSentAtMs = Date.now();
+            Logger.write('===INPUT_SILENCE_PROMPT===');
+            sendStatus('input_silence_prompt', 'Абонент молчит, уточняю на линии ли он', {}, session);
+            try {
+                sendUserTextToModel(
+                    activeGeminiClient,
+                    'Абонент молчит, входящей транскрибации давно нет. Не задавай новый вопрос. Скажи коротко и естественно: «Извините, я вас не слышу. Вы еще на линии?»',
+                    'input_silence_prompt'
+                );
+            } catch (e) {
+                Logger.write('===INPUT_SILENCE_PROMPT_ERROR===');
+                Logger.write(String(e));
+            }
+        };
+
+        const finalizeInputSilence = () => {
+            if (session.done || finishingCurrentCall || session.silenceFinalizing) return;
+            session.silenceFinalizing = true;
+            Logger.write('===INPUT_SILENCE_TIMEOUT===');
+            sendStatus('input_silence_timeout', 'Абонент молчит, завершаю звонок', {}, session);
+            try {
+                if (activeGeminiClient) {
+                    sendUserTextToModel(
+                        activeGeminiClient,
+                        'Абонент слишком долго молчит и входящей транскрибации нет. Скажи коротко: «Извините, я вас не слышу, поэтому завершаю звонок. Хорошего дня.» После этой фразы больше ничего не спрашивай.',
+                        'input_silence_hangup'
+                    );
+                }
+            } catch (e) {
+                Logger.write('===INPUT_SILENCE_HANGUP_PROMPT_ERROR===');
+                Logger.write(String(e));
+            }
+            session.inputSilenceFinalHangupTimer = setTimeout(() => {
+                finishAndContinue('input_silence_timeout', true);
+            }, INPUT_SILENCE_FINAL_HANGUP_DELAY_MS);
+        };
+
+        const scheduleInputSilenceCheck = () => {
+            session.inputSilenceTimer = clearTimer(session.inputSilenceTimer);
+            if (session.done || finishingCurrentCall || !session.callConnected || !session.callerInputConnected) return;
+            session.inputSilenceTimer = setTimeout(() => {
+                session.inputSilenceTimer = null;
+                if (session.done || finishingCurrentCall || !session.callConnected || !session.callerInputConnected) return;
+                const now = Date.now();
+                const lastInputAt = session.lastInboundTranscriptAtMs || now;
+                if (!session.silencePromptSent && now - lastInputAt >= INPUT_SILENCE_PROMPT_MS) {
+                    sendInputSilencePrompt();
+                } else if (
+                    session.silencePromptSent &&
+                    session.silencePromptSentAtMs &&
+                    now - session.silencePromptSentAtMs >= INPUT_SILENCE_HANGUP_MS
+                ) {
+                    finalizeInputSilence();
+                    return;
+                }
+                scheduleInputSilenceCheck();
+            }, INPUT_SILENCE_CHECK_INTERVAL_MS);
+        };
+
+        const startInputSilenceWatchdog = (reason) => {
+            if (session.done || finishingCurrentCall || !session.callConnected || !session.callerInputConnected) return;
+            if (!session.lastInboundTranscriptAtMs) session.lastInboundTranscriptAtMs = Date.now();
+            Logger.write(`===INPUT_SILENCE_WATCHDOG_STARTED:${reason}===`);
+            sendStatus('input_silence_watchdog_started', 'Контроль молчания включен', { reason }, session);
+            scheduleInputSilenceCheck();
         };
 
         const formatRecentDialogueText = (limit) => {
@@ -832,6 +927,7 @@ ${recentDialogue || 'Истории реплик нет. Просто извин
             activeCallTimer = clearTimer(activeCallTimer);
             callTimeoutTimer = clearTimer(callTimeoutTimer);
             summaryWaitTimer = clearTimer(summaryWaitTimer);
+            stopInputSilenceWatchdog();
             session.reconnectTimer = clearTimer(session.reconnectTimer);
             session.openingUnlockTimer = clearTimer(session.openingUnlockTimer);
 
@@ -975,6 +1071,7 @@ ${recentDialogue || 'Истории реплик нет. Просто извин
                 session.openingUnlockTimer = clearTimer(session.openingUnlockTimer);
                 Logger.write(`===CALLER_INPUT_CONNECTED:${reason}===`);
                 sendStatus('caller_input_enabled', 'Микрофон абонента подключен к AI', { reason }, session);
+                startInputSilenceWatchdog(reason);
             } catch (e) {
                 Logger.write('===CALLER_INPUT_CONNECT_ERROR===');
                 Logger.write(String(e));
@@ -986,6 +1083,7 @@ ${recentDialogue || 'Истории реплик нет. Просто извин
                     session.openingUnlockTimer = clearTimer(session.openingUnlockTimer);
                     Logger.write(`===FULL_MEDIA_BRIDGE_FALLBACK:${reason}===`);
                     sendStatus('caller_input_enabled', 'Медиа между абонентом и AI подключено fallback-методом', { reason }, session);
+                    startInputSilenceWatchdog(reason);
                 } catch (fallbackError) {
                     Logger.write('===FULL_MEDIA_BRIDGE_FALLBACK_ERROR===');
                     Logger.write(String(fallbackError));
@@ -1010,6 +1108,7 @@ ${recentDialogue || 'Истории реплик нет. Просто извин
                     session.geminiOutputConnected = true;
                     session.callerInputConnected = true;
                     Logger.write(`===FULL_MEDIA_BRIDGE_FALLBACK:${reason}===`);
+                    startInputSilenceWatchdog(reason);
                     return true;
                 } catch (fallbackError) {
                     Logger.write('===FULL_MEDIA_BRIDGE_FALLBACK_ERROR===');
@@ -1054,6 +1153,7 @@ ${recentDialogue || 'Истории реплик нет. Просто извин
                 session.geminiOutputConnected = true;
                 session.callerInputConnected = true;
                 Logger.write('===FULL_MEDIA_BRIDGE_CONNECTED:reconnect===');
+                startInputSilenceWatchdog('reconnect');
             } catch (e) {
                 Logger.write('===FULL_MEDIA_BRIDGE_RECONNECT_ERROR===');
                 Logger.write(String(e));
@@ -1228,6 +1328,7 @@ ${recentDialogue || 'Истории реплик нет. Просто извин
                 const outputText = extractText(payload.outputTranscription);
 
                 if (inputText) {
+                    markInboundTranscriptActivity();
                     if (session.currentAssistantParts.length) {
                         finalizePhrase('assistant', session.currentAssistantParts, 'complete');
                     }
