@@ -22,7 +22,7 @@ const VIEW_COLUMNS = [
   { key: 'average_check', title: 'Средний чек', width: 150, kind: 'text', align: 'center', wrap: true },
   { key: 'traffic_source', title: 'Трафик Сарафан/Входящий', width: 230, kind: 'text', wrap: true },
   { key: 'comment', title: 'Комментарий', width: 360, kind: 'text', wrap: true },
-  { key: 'bot_impression', title: 'Для бота: Приятно или не приятно говорить с Ботом? Да/Нет', width: 300, kind: 'text', wrap: true },
+  { key: 'bot_impression', title: 'Оценка AI-помощника / комментарий', width: 300, kind: 'text', wrap: true },
   { key: 'transcript', title: 'Для бота: Транскрибация диалога', width: 520, kind: 'text', wrap: true },
   { key: 'summary', title: 'Для бота: Саммари разговора', width: 420, kind: 'text', wrap: true },
 ];
