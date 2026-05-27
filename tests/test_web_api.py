@@ -3,6 +3,7 @@ import os
 import sys
 import tempfile
 import unittest
+from datetime import datetime, timedelta
 from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
@@ -157,6 +158,58 @@ class WebApiTest(unittest.TestCase):
         self.assertEqual(update.status_code, 200, update.text)
         self.assertEqual(update.json()["name"], "Никита Ф.")
         self.assertEqual(update.json()["company"], "Nord Wood Studio")
+
+    def test_web_calls_are_sorted_by_call_time_not_processing_update_time(self):
+        self.login()
+        db = self.database.SessionLocal()
+        now = datetime(2026, 5, 27, 12, 0, 0)
+        try:
+            campaign = self.database.Campaign(name="forum_amix", status="paused")
+            db.add(campaign)
+            db.flush()
+            old_call = self.database.Call(
+                voximplant_session_id="old-call",
+                campaign_id=campaign.id,
+                client_phone="79950000001",
+                client_name="Старый звонок",
+                status="finalized",
+                started_at=now - timedelta(days=1, minutes=1),
+                finished_at=now - timedelta(days=1),
+                updated_at=now + timedelta(hours=2),
+            )
+            new_call = self.database.Call(
+                voximplant_session_id="new-call",
+                campaign_id=campaign.id,
+                client_phone="79950000002",
+                client_name="Новый звонок",
+                status="finalized",
+                started_at=now - timedelta(minutes=1),
+                finished_at=now,
+                updated_at=now - timedelta(hours=2),
+            )
+            db.add_all([old_call, new_call])
+            db.commit()
+            campaign_id = campaign.id
+        finally:
+            db.close()
+
+        calls_response = self.client.get("/web/calls?limit=10")
+        self.assertEqual(calls_response.status_code, 200, calls_response.text)
+        self.assertEqual([item["session_id"] for item in calls_response.json()[:2]], ["new-call", "old-call"])
+
+        dashboard_response = self.client.get("/web/dashboard")
+        self.assertEqual(dashboard_response.status_code, 200, dashboard_response.text)
+        self.assertEqual(
+            [item["session_id"] for item in dashboard_response.json()["calls"]["recent"][:2]],
+            ["new-call", "old-call"],
+        )
+
+        campaign_response = self.client.get(f"/web/campaigns/{campaign_id}")
+        self.assertEqual(campaign_response.status_code, 200, campaign_response.text)
+        self.assertEqual(
+            [item["session_id"] for item in campaign_response.json()["calls"][:2]],
+            ["new-call", "old-call"],
+        )
 
     def test_inbound_finalize_sends_concise_summary_and_schedules_recording_reply(self):
         with (

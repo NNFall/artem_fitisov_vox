@@ -28,7 +28,7 @@ from fastapi import Cookie, Depends, FastAPI, File, HTTPException, Path as ApiPa
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
-from sqlalchemy import or_
+from sqlalchemy import func, or_
 from sqlalchemy.orm import Session
 
 from database import Call, Campaign, OutboundContact, OutboundEvent, OutboundTask, SessionLocal
@@ -2456,6 +2456,17 @@ def web_call_payload(call: Call) -> dict[str, Any]:
     return payload
 
 
+def web_call_order_by():
+    activity_time = func.coalesce(
+        Call.finished_at,
+        Call.connected_at,
+        Call.started_at,
+        Call.exported_at,
+        Call.updated_at,
+    )
+    return activity_time.desc(), Call.id.desc()
+
+
 def web_campaign_detail(db: Session, campaign: Campaign) -> dict[str, Any]:
     contacts = (
         db.query(OutboundContact)
@@ -2473,7 +2484,7 @@ def web_campaign_detail(db: Session, campaign: Campaign) -> dict[str, Any]:
     calls = (
         db.query(Call)
         .filter(Call.campaign_id == campaign.id)
-        .order_by(Call.updated_at.desc(), Call.id.desc())
+        .order_by(*web_call_order_by())
         .limit(100)
         .all()
     )
@@ -2997,7 +3008,7 @@ def web_dashboard(
     task_completed = db.query(OutboundTask).filter(OutboundTask.status == "completed").count()
     task_failed = db.query(OutboundTask).filter(OutboundTask.status == "failed").count()
     campaigns_total = db.query(Campaign).count()
-    recent_calls = db.query(Call).order_by(Call.updated_at.desc(), Call.id.desc()).limit(8).all()
+    recent_calls = db.query(Call).order_by(*web_call_order_by()).limit(8).all()
     recent_campaigns = db.query(Campaign).order_by(Campaign.updated_at.desc(), Campaign.id.desc()).limit(8).all()
     return {
         "campaigns": {
@@ -3202,7 +3213,7 @@ def web_list_calls(
     db: Session = Depends(get_db),
 ):
     del username
-    calls = db.query(Call).order_by(Call.updated_at.desc(), Call.id.desc()).limit(limit).all()
+    calls = db.query(Call).order_by(*web_call_order_by()).limit(limit).all()
     return [web_call_payload(call) for call in calls]
 
 
@@ -3221,7 +3232,7 @@ def web_call_history(
     calls = (
         db.query(Call)
         .filter(or_(Call.client_phone == normalized_phone, Call.caller_phone == normalized_phone))
-        .order_by(Call.updated_at.desc(), Call.id.desc())
+        .order_by(*web_call_order_by())
         .limit(limit)
         .all()
     )
@@ -3384,7 +3395,7 @@ def get_inbound_caller_context(
     recent_calls = (
         db.query(Call)
         .filter(or_(Call.client_phone == normalized_phone, Call.caller_phone == normalized_phone))
-        .order_by(Call.updated_at.desc(), Call.id.desc())
+        .order_by(*web_call_order_by())
         .limit(5)
         .all()
     )

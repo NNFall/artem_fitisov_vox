@@ -46,6 +46,9 @@ type CampaignShell = {
   name: string;
   source_filename?: string | null;
 };
+type CallsPageState = {
+  source: "dashboard" | "campaign" | "history";
+};
 
 const statusLabels: Record<string, string> = {
   active: "Активна",
@@ -201,6 +204,19 @@ function callPhone(call: Call) {
 
 function callSummary(call: Call) {
   return compactText(call.summary || call.outcome || call.next_step, "Итог пока не заполнен");
+}
+
+function campaignShortName(campaign?: Campaign | null) {
+  const text = compactText(campaign?.name, "");
+  if (!text) return "Вне кампании";
+  return text.length > 18 ? `${text.slice(0, 18).trim()}...` : text;
+}
+
+function campaignLabel(campaigns: Campaign[], call: Call) {
+  if (!call.campaign_id) return "Входящий";
+  const campaign = campaigns.find((item) => item.id === call.campaign_id);
+  if (!campaign) return `#${call.campaign_id}`;
+  return `#${campaign.id} ${campaignShortName(campaign)}`;
 }
 
 function callDirection(call: Call): { type: CallDirection; label: string; Icon: typeof PhoneIncoming } {
@@ -517,6 +533,7 @@ function DashboardPage({
   loading,
   onOpenCampaign,
   onOpenCall,
+  onOpenCalls,
 }: {
   dashboard: Dashboard | null;
   campaigns: Campaign[];
@@ -524,6 +541,7 @@ function DashboardPage({
   loading: boolean;
   onOpenCampaign: (campaign: Campaign) => void;
   onOpenCall: (call: Call) => void;
+  onOpenCalls: () => void;
 }) {
   if (!dashboard && loading) return <LoadingPanel title="Загружаю обзор" />;
 
@@ -577,19 +595,31 @@ function DashboardPage({
 
         <aside className="side-panel">
           <div className="section-head">
-            <h2>Последние звонки</h2>
+            <button type="button" className="section-title-button" onClick={onOpenCalls}>
+              <h2>Последние звонки</h2>
+              <small>Открыть весь журнал</small>
+            </button>
             <span>{dashboard?.calls.total ?? calls.length}</span>
           </div>
           <div className="compact-call-list">
-            {calls.slice(0, 5).map((call) => (
-              <button type="button" key={call.id} className="compact-call" onClick={() => onOpenCall(call)}>
-                <span>
-                  <strong>{callName(call)}</strong>
-                  <small>{callPhone(call)}</small>
-                </span>
-                <span className={`status-pill ${statusTone(call.status)}`}>{statusRu(call.status)}</span>
-              </button>
-            ))}
+            {calls.slice(0, 5).map((call) => {
+              const direction = callDirection(call);
+              const DirectionIcon = direction.Icon;
+              return (
+                <button type="button" key={call.id} className="compact-call" onClick={() => onOpenCall(call)}>
+                  <span>
+                    <strong>{callName(call)}</strong>
+                    <small>{callPhone(call)}</small>
+                    <span className="compact-call-meta">
+                      <DirectionIcon size={13} />
+                      {direction.label}
+                      <i>{formatDate(callDateValue(call))}</i>
+                    </span>
+                  </span>
+                  <span className={`status-pill ${statusTone(call.status)}`}>{statusRu(call.status)}</span>
+                </button>
+              );
+            })}
             {!calls.length ? <EmptyBlock title="Звонков пока нет" text="Когда кампания начнет работать, здесь появятся последние разговоры." compact /> : null}
           </div>
         </aside>
@@ -968,10 +998,12 @@ function ContactDetail({
 
 function CallDetail({
   call,
+  loading,
   onBack,
   onOpenHistory,
 }: {
   call: Call;
+  loading: boolean;
   onBack: () => void;
   onOpenHistory: (phone: string, name: string) => void;
 }) {
@@ -999,6 +1031,7 @@ function CallDetail({
             <p>{callPhone(call)} · {formatDate(callDateValue(call))}</p>
           </div>
           <div className="object-actions">
+            {loading ? <span className="loading-chip"><RefreshCw size={15} className="spin" />Обновляю звонок</span> : null}
             <span className={`direction-pill ${direction.type}`}><DirectionIcon size={15} />{direction.label}</span>
             {call.transcription_status && (
               <span className={`status-pill ${statusTone(call.transcription_status)}`}>{statusRu(call.transcription_status)}</span>
@@ -1178,6 +1211,155 @@ function ContactHistoryPage({
   );
 }
 
+function AllCallsPage({
+  calls,
+  campaigns,
+  loading,
+  onBack,
+  onOpenCall,
+  onOpenCampaign,
+  onOpenHistory,
+}: {
+  calls: Call[];
+  campaigns: Campaign[];
+  loading: boolean;
+  onBack: () => void;
+  onOpenCall: (call: Call) => void;
+  onOpenCampaign: (id: number) => void;
+  onOpenHistory: (phone: string, name: string) => void;
+}) {
+  const [query, setQuery] = useState("");
+  const normalizedQuery = query.trim().toLowerCase();
+  const filteredCalls = calls.filter((call) => {
+    if (!normalizedQuery) return true;
+    return [
+      callName(call),
+      callPhone(call),
+      callSummary(call),
+      statusRu(call.status),
+      campaignLabel(campaigns, call),
+    ]
+      .join(" ")
+      .toLowerCase()
+      .includes(normalizedQuery);
+  });
+  const incoming = calls.filter((call) => callDirection(call).type === "incoming").length;
+  const outgoing = calls.length - incoming;
+  const completed = calls.filter((call) => statusTone(call.status) === "good").length;
+
+  return (
+    <div className="screen-stack enter">
+      <button type="button" className="back-button" onClick={onBack}>
+        <ArrowLeft size={20} />
+        <span>Назад</span>
+      </button>
+
+      <section className="object-detail-card calls-page-card">
+        <div className="object-head">
+          <div>
+            <p className="eyebrow">Журнал звонков</p>
+            <h2>Все последние звонки</h2>
+            <p>Входящие и исходящие касания, записи, сводки и переходы к кампаниям.</p>
+          </div>
+          <div className="object-actions">
+            {loading ? <span className="loading-chip"><RefreshCw size={15} className="spin" />Обновляю журнал</span> : null}
+            <span className="status-pill busy">{formatCount(filteredCalls.length, "звонок", "звонка", "звонков")}</span>
+          </div>
+        </div>
+
+        <div className="detail-metrics compact-metrics">
+          <MetricCard label="Всего" value={calls.length} />
+          <MetricCard label="Исходящие" value={outgoing} tone="good" />
+          <MetricCard label="Входящие" value={incoming} />
+          <MetricCard label="Завершено" value={completed} tone="good" />
+        </div>
+
+        <label className="calls-search field">
+          <span>Поиск по имени, телефону, итогу или кампании</span>
+          <input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Например: Никита, 7995, Amix" />
+        </label>
+
+        <div className="all-calls-list">
+          {filteredCalls.map((call) => {
+            const direction = callDirection(call);
+            const DirectionIcon = direction.Icon;
+            const campaign = call.campaign_id ? campaigns.find((item) => item.id === call.campaign_id) : null;
+            const phone = callPhone(call);
+            const hasPhone = Boolean(call.client_phone || call.caller_phone);
+            const name = callName(call);
+            return (
+              <article
+                className="all-call-row"
+                key={call.id}
+                role="button"
+                tabIndex={0}
+                onClick={() => onOpenCall(call)}
+                onKeyDown={(event) => {
+                  if (event.key === "Enter" || event.key === " ") {
+                    event.preventDefault();
+                    onOpenCall(call);
+                  }
+                }}
+                aria-label={`Открыть звонок: ${name}, ${phone}`}
+              >
+                <span className={`call-direction-mark ${direction.type}`} aria-hidden="true">
+                  <DirectionIcon size={18} />
+                </span>
+                <div className="all-call-main">
+                  <span className="all-call-title">
+                    <strong>{name}</strong>
+                    <small>{phone}</small>
+                  </span>
+                  <span className="all-call-summary">{callSummary(call)}</span>
+                </div>
+                <span className="all-call-meta">
+                  <span className={`direction-pill ${direction.type}`}><DirectionIcon size={14} />{direction.label}</span>
+                  <time>{formatDate(callDateValue(call))}</time>
+                </span>
+                <span className="all-call-status">
+                  <span className={`status-pill ${statusTone(call.status)}`}>{statusRu(call.status)}</span>
+                  <small>{formatDuration(call.duration)}</small>
+                </span>
+                <span className="all-call-actions">
+                  {campaign ? (
+                    <button
+                      type="button"
+                      className="history-campaign-link"
+                      onClick={(event) => {
+                        event.stopPropagation();
+                        onOpenCampaign(campaign.id);
+                      }}
+                      title={campaign.name}
+                    >
+                      {campaignLabel(campaigns, call)}
+                    </button>
+                  ) : (
+                    <span className="history-campaign-link muted">Входящий</span>
+                  )}
+                  <button
+                    type="button"
+                    className="history-campaign-link"
+                    onClick={(event) => {
+                      event.stopPropagation();
+                      onOpenHistory(phone, name);
+                    }}
+                    disabled={!hasPhone}
+                    title={hasPhone ? "Открыть историю клиента" : "Телефон не указан"}
+                  >
+                    История клиента
+                  </button>
+                </span>
+              </article>
+            );
+          })}
+          {loading && !filteredCalls.length ? <TableSkeleton rows={6} columns={5} /> : null}
+          {!loading && !filteredCalls.length ? <EmptyBlock title="Звонки не найдены" text="Измените поиск или обновите журнал звонков." /> : null}
+        </div>
+      </section>
+    </div>
+  );
+}
+
 function ResultLine({ label, value }: { label: string; value?: string | null }) {
   return (
     <div className="result-line">
@@ -1216,18 +1398,25 @@ export function App() {
   const [selectedContact, setSelectedContact] = useState<Contact | null>(null);
   const [selectedCall, setSelectedCall] = useState<Call | null>(null);
   const [selectedHistory, setSelectedHistory] = useState<ContactHistory | null>(null);
+  const [callsPage, setCallsPage] = useState<CallsPageState | null>(null);
   const [historyLoading, setHistoryLoading] = useState(false);
+  const [callLoading, setCallLoading] = useState(false);
   const [detailTab, setDetailTab] = useState<DetailTab>("calls");
   const [calls, setCalls] = useState<Call[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
   const [message, setMessage] = useState("");
+  const refreshRequestRef = useRef(0);
   const campaignRequestRef = useRef(0);
   const historyRequestRef = useRef(0);
+  const callRequestRef = useRef(0);
+  const callsPageRequestRef = useRef(0);
 
   const selectedCallFromList = useMemo(() => {
     if (!selectedCall) return null;
-    return calls.find((call) => call.id === selectedCall.id) || selectedCampaign?.calls.find((call) => call.id === selectedCall.id) || selectedCall;
+    const listCall = calls.find((call) => call.id === selectedCall.id);
+    const campaignCall = selectedCampaign?.calls.find((call) => call.id === selectedCall.id);
+    return { ...(listCall || {}), ...(campaignCall || {}), ...selectedCall } as Call;
   }, [calls, selectedCall, selectedCampaign]);
 
   const selectedCampaignShell = useMemo(() => {
@@ -1238,14 +1427,17 @@ export function App() {
 
   async function refresh(targetCampaignId = selectedCampaignId) {
     if (!authenticated) return;
+    const requestId = refreshRequestRef.current + 1;
+    refreshRequestRef.current = requestId;
     setLoading(true);
     setError("");
     try {
       const [dashboardData, campaignData, callsData] = await Promise.all([
         api.dashboard(),
         api.campaigns(),
-        api.calls(100),
+        api.calls(callsPage ? 500 : 100),
       ]);
+      if (refreshRequestRef.current !== requestId) return;
       setDashboard(dashboardData);
       setCampaigns(campaignData);
       setCalls(callsData);
@@ -1253,6 +1445,7 @@ export function App() {
       const idToLoad = targetCampaignId || selectedCampaignId;
       if (idToLoad) {
         const detail = await api.campaign(idToLoad);
+        if (refreshRequestRef.current !== requestId) return;
         setSelectedCampaign(detail);
         setSelectedCampaignId(idToLoad);
         if (selectedContact) {
@@ -1261,9 +1454,13 @@ export function App() {
         }
       }
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Не удалось загрузить данные");
+      if (refreshRequestRef.current === requestId) {
+        setError(err instanceof Error ? err.message : "Не удалось загрузить данные");
+      }
     } finally {
-      setLoading(false);
+      if (refreshRequestRef.current === requestId) {
+        setLoading(false);
+      }
     }
   }
 
@@ -1290,6 +1487,7 @@ export function App() {
     setSelectedContact(null);
     setSelectedCall(null);
     setSelectedHistory(null);
+    setCallsPage(null);
     setHistoryLoading(false);
     setDetailTab("calls");
     try {
@@ -1351,6 +1549,77 @@ export function App() {
     }
   }
 
+  function mergeCallIntoState(nextCall: Call) {
+    setCalls((items) => items.map((item) => (item.id === nextCall.id ? nextCall : item)));
+    setSelectedCampaign((detail) => (
+      detail
+        ? { ...detail, calls: detail.calls.map((item) => (item.id === nextCall.id ? nextCall : item)) }
+        : detail
+    ));
+    setSelectedHistory((history) => (
+      history
+        ? { ...history, calls: history.calls.map((item) => (item.id === nextCall.id ? nextCall : item)) }
+        : history
+    ));
+  }
+
+  async function openCall(call: Call) {
+    const requestId = callRequestRef.current + 1;
+    callRequestRef.current = requestId;
+    setSelectedCall(call);
+    setSelectedContact(null);
+    setError("");
+    if (!call.session_id) return;
+    setCallLoading(true);
+    try {
+      const freshCall = await api.call(call.session_id);
+      if (callRequestRef.current !== requestId) return;
+      setSelectedCall(freshCall);
+      mergeCallIntoState(freshCall);
+    } catch (err) {
+      if (callRequestRef.current === requestId) {
+        setError(err instanceof Error ? err.message : "Не удалось обновить карточку звонка");
+      }
+    } finally {
+      if (callRequestRef.current === requestId) {
+        setCallLoading(false);
+      }
+    }
+  }
+
+  async function openCallsPage(source: CallsPageState["source"] = "dashboard") {
+    const requestId = callsPageRequestRef.current + 1;
+    callsPageRequestRef.current = requestId;
+    setCallsPage({ source });
+    setSelectedCampaign(null);
+    setSelectedCampaignId(null);
+    setSelectedContact(null);
+    setSelectedCall(null);
+    setSelectedHistory(null);
+    setHistoryLoading(false);
+    setError("");
+    setLoading(true);
+    try {
+      const [callsData, campaignData, dashboardData] = await Promise.all([
+        api.calls(500),
+        api.campaigns(),
+        api.dashboard(),
+      ]);
+      if (callsPageRequestRef.current !== requestId) return;
+      setCalls(callsData);
+      setCampaigns(campaignData);
+      setDashboard(dashboardData);
+    } catch (err) {
+      if (callsPageRequestRef.current === requestId) {
+        setError(err instanceof Error ? err.message : "Не удалось загрузить журнал звонков");
+      }
+    } finally {
+      if (callsPageRequestRef.current === requestId) {
+        setLoading(false);
+      }
+    }
+  }
+
   async function uploadBase(file: File) {
     setLoading(true);
     setError("");
@@ -1407,9 +1676,15 @@ export function App() {
     setSelectedContact(null);
     setSelectedCall(null);
     setSelectedHistory(null);
+    setCallsPage(null);
     setHistoryLoading(false);
+    setCallLoading(false);
+    setLoading(false);
+    refreshRequestRef.current += 1;
     campaignRequestRef.current += 1;
     historyRequestRef.current += 1;
+    callRequestRef.current += 1;
+    callsPageRequestRef.current += 1;
     setCalls([]);
   }
 
@@ -1432,7 +1707,16 @@ export function App() {
       />
 
       {selectedCallFromList ? (
-        <CallDetail call={selectedCallFromList} onBack={() => setSelectedCall(null)} onOpenHistory={(phone, name) => void openContactHistory(phone, name)} />
+        <CallDetail
+          call={selectedCallFromList}
+          loading={callLoading}
+          onBack={() => {
+            callRequestRef.current += 1;
+            setCallLoading(false);
+            setSelectedCall(null);
+          }}
+          onOpenHistory={(phone, name) => void openContactHistory(phone, name)}
+        />
       ) : selectedHistory ? (
         <ContactHistoryPage
           history={selectedHistory}
@@ -1443,7 +1727,7 @@ export function App() {
             setHistoryLoading(false);
             setSelectedHistory(null);
           }}
-          onOpenCall={setSelectedCall}
+          onOpenCall={(call) => void openCall(call)}
           onOpenCampaign={(id) => void openCampaign(id)}
         />
       ) : selectedContact ? (
@@ -1467,7 +1751,7 @@ export function App() {
           onTab={setDetailTab}
           onAction={(action) => void campaignAction(action)}
           onDelay={(seconds) => void saveDelay(seconds)}
-          onOpenCall={setSelectedCall}
+          onOpenCall={(call) => void openCall(call)}
           onOpenContact={setSelectedContact}
         />
       ) : selectedCampaignShell ? (
@@ -1482,6 +1766,20 @@ export function App() {
           }}
           onTab={setDetailTab}
         />
+      ) : callsPage ? (
+        <AllCallsPage
+          calls={calls}
+          campaigns={campaigns}
+          loading={loading}
+          onBack={() => {
+            callsPageRequestRef.current += 1;
+            setCallsPage(null);
+            setLoading(false);
+          }}
+          onOpenCall={(call) => void openCall(call)}
+          onOpenCampaign={(id) => void openCampaign(id)}
+          onOpenHistory={(phone, name) => void openContactHistory(phone, name)}
+        />
       ) : (
         <DashboardPage
           dashboard={dashboard}
@@ -1489,10 +1787,8 @@ export function App() {
           calls={calls}
           loading={loading}
           onOpenCampaign={(campaign) => void openCampaign(campaign)}
-          onOpenCall={(call) => {
-            setSelectedHistory(null);
-            setSelectedCall(call);
-          }}
+          onOpenCall={(call) => void openCall(call)}
+          onOpenCalls={() => void openCallsPage("dashboard")}
         />
       )}
     </main>

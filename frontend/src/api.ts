@@ -82,6 +82,9 @@ export const api = {
   calls(limit = 50) {
     return request<Call[]>(`/web/calls?limit=${limit}`);
   },
+  call(sessionId: string) {
+    return request<Call>(`/web/calls/${encodeURIComponent(sessionId)}`);
+  },
   callHistory(phone: string, limit = 100) {
     return request<Call[]>(`/web/call-history?phone=${encodeURIComponent(phone)}&limit=${limit}`);
   },

@@ -379,6 +379,30 @@ small {
   font-size: 13px;
 }
 
+.section-title-button {
+  display: grid;
+  gap: 3px;
+  padding: 0;
+  border: 0;
+  color: inherit;
+  text-align: left;
+  background: transparent;
+}
+
+.section-title-button h2 {
+  margin: 0;
+  transition: color 180ms ease;
+}
+
+.section-title-button small {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.section-title-button:hover h2 {
+  color: var(--accent-strong);
+}
+
 .campaign-list,
 .compact-call-list {
   display: grid;
@@ -499,7 +523,7 @@ small {
   align-items: center;
   gap: 12px;
   width: 100%;
-  min-height: 68px;
+  min-height: 82px;
   padding: 14px;
   border-color: #303843;
   border-radius: 14px;
@@ -509,6 +533,20 @@ small {
 
 .compact-call:nth-child(even) {
   background: var(--surface-row-alt);
+}
+
+.compact-call-meta {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  margin-top: 8px;
+  color: #91a0b5;
+  font-size: 12px;
+}
+
+.compact-call-meta i {
+  color: #737f91;
+  font-style: normal;
 }
 
 .compact-call::after {
@@ -1281,6 +1319,147 @@ small {
   color: var(--accent);
 }
 
+.history-campaign-link:disabled {
+  color: #657386;
+  cursor: not-allowed;
+}
+
+.calls-page-card {
+  gap: 26px;
+}
+
+.calls-page-card .compact-metrics {
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+}
+
+.calls-search {
+  max-width: 680px;
+}
+
+.all-calls-list {
+  display: grid;
+  gap: 10px;
+}
+
+.all-call-row {
+  display: grid;
+  grid-template-columns: 52px minmax(240px, 1.5fr) minmax(210px, 0.95fr) minmax(150px, 0.65fr) minmax(180px, 0.75fr);
+  align-items: center;
+  gap: 14px;
+  min-height: 92px;
+  padding: 16px;
+  border: 1px solid #34404c;
+  border-radius: 18px;
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.045), rgba(255, 255, 255, 0.012)),
+    #171f27;
+  cursor: pointer;
+  transition:
+    transform 180ms cubic-bezier(0.16, 1, 0.3, 1),
+    border-color 180ms ease,
+    background 180ms ease;
+}
+
+.all-call-row:nth-child(even) {
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.038), rgba(255, 255, 255, 0.01)),
+    #1b232c;
+}
+
+.all-call-row:hover {
+  transform: translateY(-1px);
+  border-color: #536173;
+  background:
+    linear-gradient(135deg, rgba(16, 212, 154, 0.08), rgba(255, 255, 255, 0.025)),
+    #202a34;
+}
+
+.all-call-row:focus-visible {
+  outline: 2px solid rgba(16, 212, 154, 0.72);
+  outline-offset: 3px;
+}
+
+.all-call-row:active {
+  transform: translateY(0) scale(0.995);
+}
+
+.call-direction-mark {
+  display: grid;
+  place-items: center;
+  width: 52px;
+  height: 52px;
+  border: 1px solid #3a4553;
+  border-radius: 17px;
+  color: #dce7f3;
+  background: #121922;
+}
+
+.call-direction-mark.incoming {
+  color: #a7caff;
+  border-color: rgba(118, 169, 255, 0.32);
+  background: rgba(118, 169, 255, 0.12);
+}
+
+.call-direction-mark.outgoing {
+  color: #85f5d0;
+  border-color: rgba(16, 212, 154, 0.3);
+  background: rgba(16, 212, 154, 0.12);
+}
+
+.all-call-main {
+  display: grid;
+  gap: 8px;
+  min-width: 0;
+  padding: 0;
+  border: 0;
+  color: inherit;
+  text-align: left;
+  background: transparent;
+}
+
+.all-call-title {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 8px 12px;
+}
+
+.all-call-title strong {
+  color: var(--text);
+  font-size: 16px;
+}
+
+.all-call-title small {
+  color: #99a7ba;
+  font-family: "JetBrains Mono", "Cascadia Mono", ui-monospace, monospace;
+}
+
+.all-call-summary {
+  overflow: hidden;
+  color: var(--muted-strong);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.all-call-meta,
+.all-call-status,
+.all-call-actions {
+  display: grid;
+  gap: 8px;
+  min-width: 0;
+}
+
+.all-call-meta time,
+.all-call-status small {
+  color: var(--muted);
+  font-family: "JetBrains Mono", "Cascadia Mono", ui-monospace, monospace;
+  font-size: 12px;
+}
+
+.all-call-actions {
+  justify-items: start;
+}
+
 .empty-block {
   display: grid;
   place-items: center;
@@ -1553,7 +1732,8 @@ small {
 
   .dashboard-grid,
   .campaign-info-grid,
-  .auth-card {
+  .auth-card,
+  .all-call-row {
     grid-template-columns: 1fr;
   }
 
@@ -1565,7 +1745,8 @@ small {
 
   .call-facts,
   .summary-panel,
-  .compact-metrics {
+  .compact-metrics,
+  .calls-page-card .compact-metrics {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 
@@ -1614,6 +1795,7 @@ small {
   .call-facts,
   .summary-panel,
   .compact-metrics,
+  .calls-page-card .compact-metrics,
   .edit-grid {
     grid-template-columns: 1fr;
   }
@@ -1700,6 +1882,22 @@ small {
     width: 100%;
     height: 38px;
     border-radius: 12px;
+  }
+
+  .all-call-row {
+    align-items: stretch;
+    gap: 12px;
+    padding: 14px;
+  }
+
+  .call-direction-mark {
+    width: 100%;
+    height: 38px;
+    border-radius: 12px;
+  }
+
+  .all-call-summary {
+    white-space: normal;
   }
 
   .audio-card {
