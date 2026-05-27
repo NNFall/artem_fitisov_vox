@@ -1,4 +1,4 @@
-import { ChangeEvent, FormEvent, useEffect, useMemo, useRef, useState } from "react";
+import { ChangeEvent, FormEvent, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import {
   Activity,
   AlertCircle,
@@ -1425,6 +1425,25 @@ export function App() {
     return campaign ? { id: campaign.id, name: campaign.name, source_filename: campaign.source_filename } : null;
   }, [campaigns, selectedCampaign, selectedCampaignId]);
 
+  const activeViewKey = useMemo(() => {
+    if (!authenticated) return checkingAuth ? "checking-auth" : "login";
+    if (selectedCall?.session_id) return `call:${selectedCall.session_id}`;
+    if (selectedHistory) return `history:${selectedHistory.phone}`;
+    if (selectedContact) return `contact:${selectedContact.id}`;
+    if (selectedCampaignId) return `campaign:${selectedCampaignId}:${detailTab}`;
+    if (callsPage) return `calls:${callsPage.source}`;
+    return "dashboard";
+  }, [
+    authenticated,
+    checkingAuth,
+    callsPage,
+    detailTab,
+    selectedCall?.session_id,
+    selectedCampaignId,
+    selectedContact,
+    selectedHistory,
+  ]);
+
   async function refresh(targetCampaignId = selectedCampaignId) {
     if (!authenticated) return;
     const requestId = refreshRequestRef.current + 1;
@@ -1475,6 +1494,10 @@ export function App() {
   useEffect(() => {
     if (authenticated) void refresh(null);
   }, [authenticated]);
+
+  useLayoutEffect(() => {
+    window.scrollTo(0, 0);
+  }, [activeViewKey]);
 
   async function openCampaign(campaign: Campaign | CampaignShell | number) {
     const campaignId = typeof campaign === "number" ? campaign : campaign.id;

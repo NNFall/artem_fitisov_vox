@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-label="Обзвон AI">
+  <rect width="64" height="64" rx="18" fill="#071313"/>
+  <path d="M13 34.2c0-11.1 7.7-19.7 19-19.7s19 8.6 19 19.7" fill="none" stroke="#1fd4a3" stroke-width="4.2" stroke-linecap="round"/>
+  <rect x="10" y="31" width="11" height="18" rx="5.5" fill="#142a2d" stroke="#38555f" stroke-width="2"/>
+  <rect x="43" y="31" width="11" height="18" rx="5.5" fill="#142a2d" stroke="#38555f" stroke-width="2"/>
+  <path d="M24.5 42c2.5 2.7 5.1 4 7.8 4h4.9" fill="none" stroke="#e8fff8" stroke-width="3" stroke-linecap="round"/>
+  <path d="M26 33v6M32 29v14M38 33v6" fill="none" stroke="#1fd4a3" stroke-width="3.4" stroke-linecap="round"/>
+  <circle cx="47.5" cy="48" r="3.6" fill="#1fd4a3"/>
+</svg>
