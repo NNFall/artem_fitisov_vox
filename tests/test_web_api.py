@@ -317,14 +317,14 @@ class WebApiTest(unittest.TestCase):
     def test_build_assemblyai_payload_prefers_multichannel_over_speaker_labels(self):
         with (
             patch.object(self.main, "ASSEMBLYAI_LANGUAGE_DETECTION", True),
-            patch.object(self.main, "ASSEMBLYAI_SPEECH_MODEL", "universal-2"),
+            patch.object(self.main, "ASSEMBLYAI_SPEECH_MODELS", ["universal-3-pro", "universal-2"]),
             patch.object(self.main, "ASSEMBLYAI_MULTICHANNEL", True),
             patch.object(self.main, "ASSEMBLYAI_SPEAKER_LABELS", True),
         ):
             payload = self.main.build_assemblyai_transcript_payload("https://example.test/audio.mp3")
 
         self.assertEqual(payload["audio_url"], "https://example.test/audio.mp3")
-        self.assertEqual(payload["speech_models"], ["universal-2"])
+        self.assertEqual(payload["speech_models"], ["universal-3-pro", "universal-2"])
         self.assertTrue(payload["language_detection"])
         self.assertTrue(payload["multichannel"])
         self.assertNotIn("speaker_labels", payload)

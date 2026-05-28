@@ -92,7 +92,15 @@ WEB_CORS_ORIGINS = [
 ]
 ASSEMBLYAI_API_KEY = os.getenv("ASSEMBLYAI_API_KEY", "").strip()
 ASSEMBLYAI_BASE_URL = os.getenv("ASSEMBLYAI_BASE_URL", "https://api.assemblyai.com").strip().rstrip("/")
-ASSEMBLYAI_SPEECH_MODEL = os.getenv("ASSEMBLYAI_SPEECH_MODEL", "universal-2").strip() or "universal-2"
+ASSEMBLYAI_SPEECH_MODELS = [
+    item.strip()
+    for item in os.getenv(
+        "ASSEMBLYAI_SPEECH_MODELS",
+        os.getenv("ASSEMBLYAI_SPEECH_MODEL", "universal-3-pro,universal-2"),
+    ).split(",")
+    if item.strip()
+] or ["universal-3-pro", "universal-2"]
+ASSEMBLYAI_SPEECH_MODEL = ASSEMBLYAI_SPEECH_MODELS[0]
 ASSEMBLYAI_LANGUAGE_DETECTION = os.getenv("ASSEMBLYAI_LANGUAGE_DETECTION", "true").lower() not in {"0", "false", "no", "off"}
 ASSEMBLYAI_SPEAKER_LABELS = os.getenv("ASSEMBLYAI_SPEAKER_LABELS", "true").lower() not in {"0", "false", "no", "off"}
 ASSEMBLYAI_MULTICHANNEL = os.getenv("ASSEMBLYAI_MULTICHANNEL", "true").lower() in {"1", "true", "yes", "on"}
@@ -1616,7 +1624,7 @@ def format_assembly_transcript(result: dict[str, Any]) -> str:
 def build_assemblyai_transcript_payload(audio_url: str) -> dict[str, Any]:
     transcript_payload: dict[str, Any] = {
         "audio_url": audio_url,
-        "speech_models": [ASSEMBLYAI_SPEECH_MODEL],
+        "speech_models": ASSEMBLYAI_SPEECH_MODELS,
     }
     if ASSEMBLYAI_LANGUAGE_DETECTION:
         transcript_payload["language_detection"] = True
@@ -1887,7 +1895,7 @@ async def process_call_analysis(session_id: str):
         context = build_call_analysis_context(db, db_call)
         db_call.transcription_status = "running"
         db_call.transcription_provider = "assemblyai"
-        db_call.transcription_model = ASSEMBLYAI_SPEECH_MODEL
+        db_call.transcription_model = ",".join(ASSEMBLYAI_SPEECH_MODELS)
         db_call.transcription_error = None
         db_call.transcription_started_at = datetime.utcnow()
         db_call.updated_at = datetime.utcnow()
@@ -1925,7 +1933,11 @@ async def process_call_analysis(session_id: str):
             return
         db_call.transcription_status = "completed"
         db_call.transcription_provider = "assemblyai"
-        db_call.transcription_model = ASSEMBLYAI_SPEECH_MODEL
+        db_call.transcription_model = (
+            safe_text(assembly_result.get("speech_model_used")).strip()
+            or safe_text(assembly_result.get("speech_model")).strip()
+            or ",".join(ASSEMBLYAI_SPEECH_MODELS)
+        )
         db_call.transcription_id = safe_text(assembly_result.get("id")).strip() or None
         db_call.transcription_text = transcript_text
         db_call.transcription_raw_json = to_json_text(assembly_result)
