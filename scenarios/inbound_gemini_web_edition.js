@@ -100,11 +100,7 @@ const buildOpeningInstruction = (callerPhone, callerContext) => {
     const leadContext = (callerContext && callerContext.lead_context) || {};
     const firstName = getLeadFirstName(leadContext);
     const namePart = firstName ? `${firstName}, ` : '';
-    const attendanceStatus = safeString(leadContext.attendance_status).toLowerCase();
-    const attendedText =
-        attendanceStatus === 'not_attended'
-            ? 'вы регистрировались на мебельный форум Amix в марте'
-            : 'вы были на мебельном форуме Amix в марте';
+    const attendedText = 'вы регистрировались на мебельное мероприятие Amix в марте';
 
     if (callerContext && callerContext.known) {
         return `Абонент сам перезвонил с номера ${callerPhone}. Не жди его первой длинной реплики. Скажи одним сообщением: "${namePart}добрый день! Это Екатерина, AI-помощник. Мы вам звонили по базе форума Amix, возможно, вы перезваниваете. Напомню: ${attendedText}. Можно я задам 3-4 коротких вопроса?"`;

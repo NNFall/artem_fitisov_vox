@@ -70,8 +70,8 @@ The customer workbook format is supported directly:
 
 For `Пришёл`, value `ДА` is treated as `attended`; an empty cell is treated as `not_attended`. The scenario uses this to choose the opening line:
 
-- `attended`: "Вы были на мебельном форуме Amix..."
-- `not_attended`: "Вы регистрировались на мебельный форум Amix..."
+- `attended`: "Вы регистрировались на мебельное мероприятие Amix..."
+- `not_attended`: "Вы регистрировались на мебельное мероприятие Amix..."
 
 Manager/bot columns are also imported into lead context when filled: `Вид деятельности`, `Руководитель компании, Да/Нет`, `Средний чек`, `Трафик Сарафан/Входящий`, `Комментарий`, and bot result columns.
 
