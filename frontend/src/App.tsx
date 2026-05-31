@@ -1509,14 +1509,13 @@ export function App() {
     if (selectedCall?.session_id) return `call:${selectedCall.session_id}`;
     if (selectedHistory) return `history:${selectedHistory.phone}`;
     if (selectedContact) return `contact:${selectedContact.id}`;
-    if (selectedCampaignId) return `campaign:${selectedCampaignId}:${detailTab}`;
+    if (selectedCampaignId) return `campaign:${selectedCampaignId}`;
     if (callsPage) return `calls:${callsPage.source}`;
     return "dashboard";
   }, [
     authenticated,
     checkingAuth,
     callsPage,
-    detailTab,
     selectedCall?.session_id,
     selectedCampaignId,
     selectedContact,
