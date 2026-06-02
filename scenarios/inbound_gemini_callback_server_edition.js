@@ -21,6 +21,7 @@ const SCRIPT_NAME = 'inbound_gemini_callback_server_edition.js';
 const GEMINI_MODEL = 'gemini-2.5-flash-native-audio-preview-12-2025';
 const GEMINI_VOICE_NAME = 'Kore';
 const SUMMARY_FUNCTION_NAME = 'save_call_summary';
+const END_CALL_FUNCTION_NAME = 'end_current_call';
 
 const CALL_RECORD_ENABLED = true;
 const MAX_CALL_DURATION_MS = 5 * 60 * 1000;
@@ -149,6 +150,8 @@ ${buildLeadContextText(callerContext)}
 — в начале разговора при первой же нечеткой реплике обязательно попроси говорить громче короткой фразой;
 — используй короткие строгие реплики: «Повторите громче, пожалуйста», «Говорите громче, пожалуйста», «Я вас плохо слышу, говорите громче, пожалуйста», «Не поняла, повторите громче, пожалуйста»;
 — не объясняй долго причину, не извиняйся длинно, не задавай новый вопрос, пока не получила понятный ответ.
+
+Если ты понимаешь, что разговариваешь не с живым человеком, а с автоответчиком, голосовой почтой, умной защитой МТС/Т-Банка, виртуальным секретарем оператора, роботом, IVR-меню или слышишь фразы вроде «абонент не может ответить», «телефон выключен», «нажмите 1», «оставьте сообщение», не продолжай сценарий и не задавай вопросы. Коротко зафиксируй итог: «Поняла, абонент сейчас недоступен. Завершаю звонок.» Затем обязательно вызови функцию ${END_CALL_FUNCTION_NAME} с причиной `non_human_or_unavailable`.
 
 Когда разговор завершен или собраны основные ответы, обязательно вызови функцию ${SUMMARY_FUNCTION_NAME}.
 
@@ -575,6 +578,18 @@ VoxEngine.addEventListener(AppEvents.CallAlerting, async ({ call }) => {
                                     },
                                     required: ['summary', 'call_goal', 'outcome']
                                 }
+                            },
+                            {
+                                name: END_CALL_FUNCTION_NAME,
+                                description: 'Завершить текущий звонок, если отвечает автоответчик, умная защита, робот, IVR или разговор больше не имеет смысла.',
+                                parameters: {
+                                    type: 'object',
+                                    properties: {
+                                        reason: { type: 'string' },
+                                        note: { type: 'string' }
+                                    },
+                                    required: ['reason']
+                                }
                             }
                         ]
                     }
@@ -595,9 +610,42 @@ VoxEngine.addEventListener(AppEvents.CallAlerting, async ({ call }) => {
             const payload = extractEventPayload(event);
             const calls = payload.functionCalls || payload.function_calls || [];
             calls.forEach((fc) => {
-                if (safeString(fc && fc.name) !== SUMMARY_FUNCTION_NAME) return;
+                const functionName = safeString(fc && fc.name);
                 let args = (fc && fc.args) || {};
                 if (typeof args === 'string') args = parseJsonMaybe(args) || {};
+
+                if (functionName === END_CALL_FUNCTION_NAME) {
+                    if (fc && fc.id && activeGeminiClient && typeof activeGeminiClient.sendToolResponse === 'function') {
+                        try {
+                            activeGeminiClient.sendToolResponse({
+                                functionResponses: [
+                                    {
+                                        id: fc.id,
+                                        name: END_CALL_FUNCTION_NAME,
+                                        response: { result: 'ok' }
+                                    }
+                                ]
+                            });
+                        } catch (e) {
+                            Logger.write('===END_CALL_TOOL_RESPONSE_ERROR===');
+                            Logger.write(String(e));
+                        }
+                    }
+                    sendStatus('ai_requested_hangup', 'AI распознал автоответчик или бессмысленный разговор и завершает звонок', {
+                        reason: normalizeText(args.reason),
+                        note: clipText(args.note, 300)
+                    });
+                    try {
+                        call.hangup();
+                    } catch (e) {
+                        Logger.write('===CALL_HANGUP_ERROR===');
+                        Logger.write(String(e));
+                    }
+                    finalizeSession('ai_requested_hangup');
+                    return;
+                }
+
+                if (functionName !== SUMMARY_FUNCTION_NAME) return;
                 summaryData.client_name = normalizeText(args.client_name);
                 summaryData.client_phone = normalizeText(args.client_phone || callerPhone);
                 summaryData.call_goal = clipText(args.call_goal, 300);

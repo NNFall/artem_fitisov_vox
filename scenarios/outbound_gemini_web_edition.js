@@ -23,6 +23,7 @@ const SCRIPT_NAME = 'outbound_gemini_web_edition.js';
 const GEMINI_MODEL = 'gemini-2.5-flash-native-audio-preview-12-2025';
 const GEMINI_VOICE_NAME = 'Kore';
 const SUMMARY_FUNCTION_NAME = 'save_call_summary';
+const END_CALL_FUNCTION_NAME = 'end_current_call';
 
 const NEXT_CALL_DELAY_MS = 1000;
 const CALL_TIMEOUT_MS = 45 * 1000;
@@ -243,6 +244,8 @@ const buildSystemInstruction = (phone, leadContext) => `
 — не обещай, что с человеком обязательно свяжется менеджер, если он этого не просил;
 — не выдумывай данные о компании, среднем чеке, роли собеседника или источниках клиентов;
 — не говори, что ты человек. Если спросили — честно скажи, что ты AI-помощник.
+
+Если ты понимаешь, что разговариваешь не с живым человеком, а с автоответчиком, голосовой почтой, умной защитой МТС/Т-Банка, виртуальным секретарем оператора, роботом, IVR-меню или слышишь фразы вроде «абонент не может ответить», «телефон выключен», «нажмите 1», «оставьте сообщение», не продолжай сценарий и не задавай вопросы. Коротко зафиксируй итог: «Поняла, абонент сейчас недоступен. Завершаю звонок.» Затем обязательно вызови функцию ${END_CALL_FUNCTION_NAME} с причиной `non_human_or_unavailable`.
 
 Когда разговор завершен или собраны основные ответы, обязательно вызови функцию ${SUMMARY_FUNCTION_NAME}.
 
@@ -1261,6 +1264,18 @@ ${recentDialogue}`;
                                         },
                                         required: ['summary', 'call_goal', 'outcome']
                                     }
+                                },
+                                {
+                                    name: END_CALL_FUNCTION_NAME,
+                                    description: 'Завершить текущий звонок, если отвечает автоответчик, умная защита, робот, IVR или разговор больше не имеет смысла.',
+                                    parameters: {
+                                        type: 'object',
+                                        properties: {
+                                            reason: { type: 'string' },
+                                            note: { type: 'string' }
+                                        },
+                                        required: ['reason']
+                                    }
                                 }
                             ]
                         }
@@ -1295,7 +1310,7 @@ ${recentDialogue}`;
                 const payload = extractEventPayload(event);
                 const calls = payload.functionCalls || [];
                 calls.forEach((fc) => {
-                    if (safeString(fc && fc.name) !== SUMMARY_FUNCTION_NAME) return;
+                    const functionName = safeString(fc && fc.name);
                     let args = (fc && fc.args) || {};
                     if (typeof args === 'string') {
                         try {
@@ -1304,6 +1319,35 @@ ${recentDialogue}`;
                             args = {};
                         }
                     }
+
+                    if (functionName === END_CALL_FUNCTION_NAME) {
+                        if (fc && fc.id) {
+                            try {
+                                client.sendToolResponse({
+                                    functionResponses: [
+                                        {
+                                            id: fc.id,
+                                            name: END_CALL_FUNCTION_NAME,
+                                            response: { result: 'ok' }
+                                        }
+                                    ]
+                                });
+                            } catch (e) {
+                                Logger.write('===END_CALL_TOOL_RESPONSE_ERROR===');
+                                Logger.write(String(e));
+                            }
+                        }
+                        sendStatus(
+                            'ai_requested_hangup',
+                            'AI распознал автоответчик или бессмысленный разговор и завершает звонок',
+                            { reason: normalizeText(args.reason), note: clipText(args.note, 300) },
+                            session
+                        );
+                        finishAndContinue('ai_requested_hangup', true);
+                        return;
+                    }
+
+                    if (functionName !== SUMMARY_FUNCTION_NAME) return;
                     session.summaryData.client_name = normalizeText(args.client_name);
                     session.summaryData.client_phone = normalizeText(args.client_phone || targetPhone);
                     session.summaryData.call_goal = clipText(args.call_goal, 300);
