@@ -11,17 +11,17 @@ const FINALIZE_FORCE_TIMEOUT_MS = 10000;
 
 const SUMMARY_FUNCTION_NAME = 'save_call_summary';
 
-const OPENAI_MODEL = 'gpt-realtime-2';
+const OPENAI_MODEL = 'gpt-realtime-1.5';
 const OPENAI_VOICE = 'marin';
 const OPENAI_SPEED = 1.15;
 const OPENAI_REASONING_EFFORT = 'medium';
 const OPENAI_TRANSCRIPTION_MODEL = 'gpt-4o-mini-transcribe';
 
-// gpt-realtime-2 public API pricing, USD per 1M tokens.
+// gpt-realtime-1.5 public API pricing, USD per 1M tokens.
 const AI_PRICE_IN_TEXT = 4.00;
 const AI_PRICE_IN_AUDIO = 32.00;
 const AI_PRICE_IN_CACHED = 0.40;
-const AI_PRICE_OUT_TEXT = 24.00;
+const AI_PRICE_OUT_TEXT = 16.00;
 const AI_PRICE_OUT_AUDIO = 64.00;
 const USD_TO_RUB_RATE = 80;
 const WEBSOCKET_PRICE_PER_MINUTE_RUB = 0.50;
