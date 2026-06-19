@@ -13,7 +13,8 @@ const SUMMARY_FUNCTION_NAME = 'save_call_summary';
 
 const OPENAI_MODEL = 'gpt-realtime-2';
 const OPENAI_VOICE = 'marin';
-const OPENAI_REASONING_EFFORT = 'low';
+const OPENAI_SPEED = 1.15;
+const OPENAI_REASONING_EFFORT = 'medium';
 const OPENAI_TRANSCRIPTION_MODEL = 'gpt-4o-mini-transcribe';
 
 // gpt-realtime-2 public API pricing, USD per 1M tokens.
@@ -319,7 +320,7 @@ VoxEngine.addEventListener(AppEvents.CallAlerting, async ({ call }) => {
 
     const sanitizeForSummary = (text) =>
         normalizeText(text)
-            .replace(/[^\u0400-\u04FFA-Za-z0-9\s.,!?;:()"%+\-]/g, ' ')
+            .replace(/[^А-Яа-яЁёA-Za-z0-9\s.,!?;:()"%+\-]/g, ' ')
             .replace(/\s+/g, ' ')
             .trim();
 
@@ -331,13 +332,13 @@ VoxEngine.addEventListener(AppEvents.CallAlerting, async ({ call }) => {
     };
 
     const normalizeName = (name) => {
-        const clean = sanitizeForSummary(name).replace(/[^A-Za-z\u0400-\u04FF\-]/g, '').trim();
+        const clean = sanitizeForSummary(name).replace(/[^A-Za-zА-Яа-яЁё\-]/g, '').trim();
         if (!clean) return '';
         return clean.charAt(0).toUpperCase() + clean.slice(1).toLowerCase();
     };
-    const hasReadableWords = (text) => /[A-Za-z\u0400-\u04FF]{3,}/.test(safeString(text));
+    const hasReadableWords = (text) => /[A-Za-zА-Яа-яЁё]{3,}/.test(safeString(text));
     const isFillerPhrase = (text) =>
-        /^(?:\u0434\u0430|\u0443\u0433\u0443|\u043e\u043a|\u043e\u043a\u0435\u0439|\u0445\u043e\u0440\u043e\u0448\u043e|\u043f\u043e\u043d\u044f\u043b(?:\u0430)?|\u043b\u0430\u0434\u043d\u043e|\u044f\u0441\u043d\u043e|\u0441\u043f\u0430\u0441\u0438\u0431\u043e|da|yes|no|si|ciao|alo|allo)\.?$/i.test(
+        /^(?:да|угу|ок|окей|хорошо|понял(?:а)?|ладно|ясно|спасибо|da|yes|no|si|ciao|alo|allo)\.?$/i.test(
             safeString(text).trim()
         );
     const extractClientNameFromDialogue = () => {
@@ -347,19 +348,19 @@ VoxEngine.addEventListener(AppEvents.CallAlerting, async ({ call }) => {
             const text = sanitizeForSummary(item.text);
             if (!text) continue;
             if (item.role === 'assistant') {
-                if (/(?:\u043a\u0430\u043a\s+\u0432\u0430\u0441\s+\u0437\u043e\u0432\u0443\u0442|\u0432\u0430\u0448\u0435\s+\u0438\u043c\u044f|\u043f\u0440\u0435\u0434\u0441\u0442\u0430\u0432\u044c\u0442)/i.test(text)) {
+                if (/(?:как\s+вас\s+зовут|ваше\s+имя|представьт)/i.test(text)) {
                     askedNameRecently = true;
                 }
                 continue;
             }
-            const direct = text.match(/\b\u043c\u0435\u043d\u044f\s+\u0437\u043e\u0432\u0443\u0442\s+([A-Za-z\u0400-\u04FF\-]{2,30})\b/i);
+            const direct = text.match(/\bменя\s+зовут\s+([A-Za-zА-Яа-яЁё\-]{2,30})\b/i);
             if (direct && direct[1]) return normalizeName(direct[1]);
             if (askedNameRecently) {
-                const candidate = text.match(/\b([A-Za-z\u0400-\u04FF\-]{2,30})\b/);
+                const candidate = text.match(/\b([A-Za-zА-Яа-яЁё\-]{2,30})\b/);
                 if (
                     candidate &&
                     candidate[1] &&
-                    !/^(?:\u0434\u0430|\u0443\u0433\u0443|\u043e\u043a|\u0445\u043e\u0440\u043e\u0448\u043e|\u043d\u0435\u0442|da|yes|no)$/i.test(candidate[1])
+                    !/^(?:да|угу|ок|хорошо|нет|da|yes|no)$/i.test(candidate[1])
                 ) {
                     return normalizeName(candidate[1]);
                 }
@@ -386,7 +387,7 @@ VoxEngine.addEventListener(AppEvents.CallAlerting, async ({ call }) => {
         const purposeQuestion =
             /(?:по\s+какому\s+вопросу|что\s+именно\s+(?:вас\s+)?интересует|что\s+именно\s+хотите|для\s+чего\s+вам|какой\s+запрос)/i;
         const nonRequestShortAnswer =
-            /^(?:[\u0400-\u04FFA-Za-z.-]{2,30})(?:\s+[\u0400-\u04FFA-Za-z.-]{2,30})?\.?$/i;
+            /^(?:[А-Яа-яЁёA-Za-z.-]{2,30})(?:\s+[А-Яа-яЁёA-Za-z.-]{2,30})?\.?$/i;
 
         let purposeAsked = false;
         for (let i = 0; i < dialogue.length; i += 1) {
@@ -685,10 +686,19 @@ VoxEngine.addEventListener(AppEvents.CallAlerting, async ({ call }) => {
         const costInTextUsd = (billableInText / 1_000_000) * AI_PRICE_IN_TEXT;
         const costInAudioUsd = (billableInAudio / 1_000_000) * AI_PRICE_IN_AUDIO;
         const costInCachedUsd = (cachedInputTokens / 1_000_000) * AI_PRICE_IN_CACHED;
+        const costInUnknownUsd = (usageStats.in_unknown / 1_000_000) * AI_PRICE_IN_AUDIO;
         const costOutTextUsd = (usageStats.out_text / 1_000_000) * AI_PRICE_OUT_TEXT;
         const costOutAudioUsd = (usageStats.out_audio / 1_000_000) * AI_PRICE_OUT_AUDIO;
+        const costOutUnknownUsd = (usageStats.out_unknown / 1_000_000) * AI_PRICE_OUT_AUDIO;
 
-        const totalAiUsd = costInTextUsd + costInAudioUsd + costInCachedUsd + costOutTextUsd + costOutAudioUsd;
+        const totalAiUsd =
+            costInTextUsd +
+            costInAudioUsd +
+            costInCachedUsd +
+            costInUnknownUsd +
+            costOutTextUsd +
+            costOutAudioUsd +
+            costOutUnknownUsd;
         const totalAiRub = totalAiUsd * USD_TO_RUB_RATE;
         const effectiveWebSocketSec = websocketDurationSec > 0 ? websocketDurationSec : callDurationSec;
         const websocketRub = (effectiveWebSocketSec / 60) * WEBSOCKET_PRICE_PER_MINUTE_RUB;
@@ -699,8 +709,10 @@ VoxEngine.addEventListener(AppEvents.CallAlerting, async ({ call }) => {
             costInTextUsd,
             costInAudioUsd,
             costInCachedUsd,
+            costInUnknownUsd,
             costOutTextUsd,
             costOutAudioUsd,
+            costOutUnknownUsd,
             totalAiUsd,
             totalAiRub,
             websocketRub,
@@ -2087,7 +2099,8 @@ ${SUMMARY_FUNCTION_NAME}
                 instructions: SYSTEM_INSTRUCTIONS,
                 audio: {
                     output: {
-                        voice: OPENAI_VOICE
+                        voice: OPENAI_VOICE,
+                        speed: OPENAI_SPEED
                     },
                     input: {
                         transcription: {
