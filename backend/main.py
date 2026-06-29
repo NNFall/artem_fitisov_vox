@@ -113,7 +113,15 @@ GEMINI_API_KEY = (
     or os.getenv("GOOGLE_AI_API_KEY", "").strip()
     or os.getenv("GOOGLE_API_KEY", "").strip()
 )
-GEMINI_SUMMARY_MODEL = os.getenv("GEMINI_SUMMARY_MODEL", "gemini-2.5-flash-lite").strip() or "gemini-2.5-flash-lite"
+GEMINI_SUMMARY_MODEL = os.getenv("GEMINI_SUMMARY_MODEL", "gemini-2.5-flash").strip() or "gemini-2.5-flash"
+GEMINI_SUMMARY_FALLBACK_MODELS = [
+    item.strip()
+    for item in os.getenv(
+        "GEMINI_SUMMARY_FALLBACK_MODELS",
+        "gemini-3.1-flash-lite,gemini-flash-lite-latest,gemini-2.5-flash-lite",
+    ).split(",")
+    if item.strip()
+]
 GEMINI_API_BASE_URL = os.getenv("GEMINI_API_BASE_URL", "https://generativelanguage.googleapis.com").strip().rstrip("/")
 POST_CALL_ANALYSIS_ENABLED = os.getenv("POST_CALL_ANALYSIS_ENABLED", "true").lower() not in {"0", "false", "no", "off"}
 
@@ -1710,7 +1718,7 @@ def build_gemini_analysis_prompt(context: dict[str, Any], transcript: str) -> st
     return f"""
 Ты анализируешь звонок голосового AI-агента Екатерины по базе форума Amix.
 
-Задача: по точной расшифровке собрать управленческую сводку без фантазий. Если информации нет, оставь поле пустым.
+Задача: по точной расшифровке собрать управленческую сводку без фантазий. Если информации нет, оставь поле пустым. Все текстовые значения JSON возвращай строго на русском языке.
 
 Контекст звонка:
 {json.dumps(context, ensure_ascii=False, indent=2)}
@@ -1752,9 +1760,36 @@ def gemini_response_schema() -> dict[str, Any]:
     }
 
 
+def gemini_summary_model_candidates() -> list[str]:
+    candidates = [GEMINI_SUMMARY_MODEL, *GEMINI_SUMMARY_FALLBACK_MODELS]
+    unique_candidates: list[str] = []
+    for model in candidates:
+        model = safe_text(model).strip()
+        if model and model not in unique_candidates:
+            unique_candidates.append(model)
+    return unique_candidates or ["gemini-2.5-flash"]
+
+
+def is_retryable_gemini_error(error: Exception) -> bool:
+    text = safe_text(error).lower()
+    retryable_markers = (
+        "gemini http 404",
+        "gemini http 408",
+        "gemini http 409",
+        "gemini http 429",
+        "gemini http 500",
+        "gemini http 502",
+        "gemini http 503",
+        "gemini http 504",
+        "unavailable",
+        "deadline",
+        "timed out",
+    )
+    return any(marker in text for marker in retryable_markers)
+
+
 async def gemini_analyze_transcript(context: dict[str, Any], transcript: str) -> dict[str, Any]:
     prompt = build_gemini_analysis_prompt(context, transcript)
-    url = f"{GEMINI_API_BASE_URL}/v1beta/models/{GEMINI_SUMMARY_MODEL}:generateContent?key={GEMINI_API_KEY}"
     payload = {
         "contents": [{"role": "user", "parts": [{"text": prompt}]}],
         "generationConfig": {
@@ -1763,25 +1798,37 @@ async def gemini_analyze_transcript(context: dict[str, Any], transcript: str) ->
             "responseSchema": gemini_response_schema(),
         },
     }
+    errors: list[str] = []
     timeout = aiohttp.ClientTimeout(total=90)
     async with aiohttp.ClientSession(timeout=timeout) as session:
-        async with session.post(url, json=payload) as response:
-            response_text = await response.text()
-            if response.status >= 400:
-                raise RuntimeError(f"Gemini HTTP {response.status}: {response_text[:1000]}")
-            result = json.loads(response_text)
+        for model in gemini_summary_model_candidates():
+            url = f"{GEMINI_API_BASE_URL}/v1beta/models/{model}:generateContent?key={GEMINI_API_KEY}"
+            try:
+                async with session.post(url, json=payload) as response:
+                    response_text = await response.text()
+                    if response.status >= 400:
+                        raise RuntimeError(f"Gemini HTTP {response.status}: {response_text[:1000]}")
+                    result = json.loads(response_text)
 
-    parts = (
-        result.get("candidates", [{}])[0]
-        .get("content", {})
-        .get("parts", [])
-    )
-    text = "\n".join(safe_text(part.get("text")) for part in parts if isinstance(part, dict)).strip()
-    parsed = parse_json_model_response(text)
-    if not parsed:
-        raise RuntimeError("Gemini returned no JSON payload")
-    parsed["_raw_response"] = result
-    return parsed
+                parts = (
+                    result.get("candidates", [{}])[0]
+                    .get("content", {})
+                    .get("parts", [])
+                )
+                text = "\n".join(safe_text(part.get("text")) for part in parts if isinstance(part, dict)).strip()
+                parsed = parse_json_model_response(text)
+                if not parsed:
+                    raise RuntimeError("Gemini returned no JSON payload")
+                parsed["_analysis_model"] = model
+                parsed["_raw_response"] = result
+                return parsed
+            except Exception as exc:  # noqa: BLE001
+                errors.append(f"{model}: {exc}")
+                if not is_retryable_gemini_error(exc):
+                    raise
+                logger.warning("Gemini analysis model failed, trying fallback model=%s error=%s", model, exc)
+
+    raise RuntimeError("Gemini analysis failed for all models: " + " | ".join(errors))
 
 
 def build_call_analysis_context(db: Session, db_call: Call) -> dict[str, Any]:
@@ -2008,6 +2055,7 @@ async def process_call_analysis(session_id: str):
         return
 
     raw_response = analysis_result.pop("_raw_response", None)
+    analysis_model = safe_text(analysis_result.pop("_analysis_model", None)).strip() or GEMINI_SUMMARY_MODEL
     db = SessionLocal()
     try:
         db_call = db.query(Call).filter(Call.voximplant_session_id == session_id).first()
@@ -2016,7 +2064,7 @@ async def process_call_analysis(session_id: str):
         apply_gemini_analysis_result(db_call, analysis_result)
         db_call.analysis_status = "completed"
         db_call.analysis_provider = "google_gemini"
-        db_call.analysis_model = GEMINI_SUMMARY_MODEL
+        db_call.analysis_model = analysis_model
         db_call.analysis_raw_json = to_json_text({"result": analysis_result, "raw_response": raw_response})
         db_call.analysis_error = None
         db_call.analysis_finished_at = datetime.utcnow()

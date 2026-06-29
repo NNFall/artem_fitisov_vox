@@ -412,6 +412,94 @@ class WebApiTest(unittest.TestCase):
         self.assertEqual(sheets_payload["summary"], "The client agreed to answer the questions.")
         self.assertEqual(sheets_payload["summary_fields"]["activity_type"], "Furniture production")
 
+    def test_gemini_analysis_falls_back_after_model_503(self):
+        class FakeResponse:
+            def __init__(self, status, body):
+                self.status = status
+                self.body = body
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, exc_type, exc, traceback):
+                return False
+
+            async def text(self):
+                return self.body
+
+        class FakeClientSession:
+            def __init__(self):
+                self.urls = []
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, exc_type, exc, traceback):
+                return False
+
+            def post(self, url, json):
+                self.urls.append(url)
+                if len(self.urls) == 1:
+                    return FakeResponse(
+                        503,
+                        '{"error":{"code":503,"message":"high demand","status":"UNAVAILABLE"}}',
+                    )
+                return FakeResponse(
+                    200,
+                    json_module.dumps(
+                        {
+                            "candidates": [
+                                {
+                                    "content": {
+                                        "parts": [
+                                            {
+                                                "text": json_module.dumps(
+                                                    {
+                                                        "summary": "Fallback model worked.",
+                                                        "outcome": "Reached",
+                                                        "next_step": "No action.",
+                                                        "call_goal": "",
+                                                        "manager_offer": "",
+                                                        "summary_fields": {},
+                                                    }
+                                                )
+                                            }
+                                        ]
+                                    }
+                                }
+                            ]
+                        }
+                    ),
+                )
+
+        import asyncio
+        import json as json_module
+
+        fake_session = FakeClientSession()
+
+        with (
+            patch.object(self.main, "GEMINI_API_KEY", "test-gemini-key"),
+            patch.object(self.main, "GEMINI_SUMMARY_MODEL", "gemini-2.5-flash-lite"),
+            patch.object(
+                self.main,
+                "GEMINI_SUMMARY_FALLBACK_MODELS",
+                ["gemini-2.5-flash"],
+                create=True,
+            ),
+            patch.object(self.main.aiohttp, "ClientSession", lambda timeout=None: fake_session),
+        ):
+            result = asyncio.run(
+                self.main.gemini_analyze_transcript(
+                    {"call": {"session_id": "test-session"}},
+                    "Client: yes\nAI: thanks",
+                )
+            )
+
+        self.assertEqual(result["summary"], "Fallback model worked.")
+        self.assertEqual(len(fake_session.urls), 2)
+        self.assertIn("gemini-2.5-flash-lite", fake_session.urls[0])
+        self.assertIn("gemini-2.5-flash", fake_session.urls[1])
+
 
 if __name__ == "__main__":
     unittest.main()
