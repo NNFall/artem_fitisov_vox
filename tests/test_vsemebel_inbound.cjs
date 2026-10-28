@@ -166,6 +166,12 @@ function fixture(nowMs = DEFAULT_NOW, storageOverrides = {}, getSecretValue) {
         outboundAttempts: () => outboundAttempts,
         closed: () => closed,
         terminated: () => terminated,
+        async runTimer(delay) {
+            const [id, timer] = [...timers].find(([, value]) => value.delay === delay) || [];
+            assert.ok(timer, `Expected a pending ${delay} ms timer`);
+            timers.delete(id);
+            await timer.callback();
+        },
         async setup() {
             assert.equal(app.listeners.get(AppEvents.CallAlerting)?.length, 1);
             await app.emit(AppEvents.CallAlerting, { call });
@@ -234,7 +240,7 @@ test('uses synchronous application Secrets with empty KVS and prefers them over 
         const f = fixture(DEFAULT_NOW, storage, name => secrets[name]);
         const config = await f.setup();
         assert.equal(config.apiKey, secrets.GEMINI_API_KEY);
-        assert.deepEqual(f.secretKeys, Object.keys(secrets));
+        assert.deepEqual(f.secretKeys.filter(name => !name.startsWith('VSEMEBEL_')), Object.keys(secrets));
         assert.deepEqual(f.storageKeys, [], 'Present Secrets must not read KVS');
         for (const value of Object.values(secrets)) {
             assert.ok(!f.logs.join('\n').includes(value), 'Config loading must not log values');
@@ -268,7 +274,7 @@ test('falls back to KVS if the Secrets API throws without logging the error', as
     const f = fixture(DEFAULT_NOW, {}, () => { throw new Error(errorText); });
     const config = await f.setup();
     assert.equal(config.apiKey, 'test-gemini-key');
-    assert.deepEqual(f.storageKeys, f.secretKeys);
+    assert.deepEqual(f.storageKeys, f.secretKeys.filter(name => !name.startsWith('VSEMEBEL_')));
     assert.equal(f.storageKeys.length, 5);
     assert.ok(!f.logs.join('\n').includes(errorText));
     assert.ok(!f.logs.join('\n').includes('test-gemini-key'));
@@ -284,6 +290,61 @@ test('config loader preserves the value entry shape and suppresses KVS lookup er
     assert.ok(!f.logs.join('\n').includes(errorText));
     assert.match(source, /let telegramBotToken = '';/);
     assert.doesNotMatch(source, /\b\d{6,}:[A-Za-z0-9_-]{20,}\b/);
+});
+
+test('community Telegram settings override generic settings and use the authenticated relay', async () => {
+    const relayUrl = 'https://obzvonai.ru/integrations/vsemebel-telegram/send-message';
+    const secrets = {
+        VSEMEBEL_TELEGRAM_BOT_TOKEN: 'scoped-test-token',
+        VSEMEBEL_TELEGRAM_CHAT_ID_ADMIN: 'scoped-admin',
+        VSEMEBEL_TELEGRAM_RELAY_URL: relayUrl,
+        VSEMEBEL_TELEGRAM_RELAY_SECRET: 'relay-test-secret'
+    };
+    const f = fixture(DEFAULT_NOW, {}, name => secrets[name]);
+    await f.setup();
+    await submitSummary(f);
+    await f.call.emit('call.Disconnected', { duration: 12 });
+    assert.equal(f.requests.length, 3);
+    const keys = new Set();
+    for (const request of f.requests) {
+        assert.equal(request.url, relayUrl);
+        assert.equal(request.options.headers.Authorization, 'Bearer relay-test-secret');
+        const body = JSON.parse(request.options.postData);
+        assert.match(body.message_key, /^vsemebel-/u);
+        assert.ok(!keys.has(body.message_key));
+        keys.add(body.message_key);
+    }
+    assert.ok(f.requests.some(request => JSON.parse(request.options.postData).chat_id === 'scoped-admin'));
+    assert.ok(!f.logs.join('\n').includes('relay-test-secret'));
+    assert.ok(!f.logs.join('\n').includes('scoped-test-token'));
+});
+
+test('incomplete or non-HTTPS relay settings do not send credentials to a fallback URL', async () => {
+    for (const settings of [
+        { VSEMEBEL_TELEGRAM_RELAY_URL: 'http://example.invalid/send-message', VSEMEBEL_TELEGRAM_RELAY_SECRET: 'relay-test-secret' },
+        { VSEMEBEL_TELEGRAM_RELAY_URL: 'https://example.invalid/send-message' }
+    ]) {
+        const f = fixture(DEFAULT_NOW, {}, name => settings[name]);
+        await f.setup();
+        await submitSummary(f);
+        await f.call.emit('call.Disconnected');
+        assert.equal(f.requests.length, 0);
+        assert.equal(f.terminated(), 1);
+    }
+});
+
+test('configured relay delivery does not depend on the generic outgoing bot token', async () => {
+    const settings = {
+        VSEMEBEL_TELEGRAM_RELAY_URL: 'https://obzvonai.ru/integrations/vsemebel-telegram/send-message',
+        VSEMEBEL_TELEGRAM_RELAY_SECRET: 'relay-test-secret'
+    };
+    const f = fixture(DEFAULT_NOW, { TELEGRAM_BOT_TOKEN: '' }, name => settings[name]);
+    const config = await f.setup();
+    assert.match(textParts(config.connectConfig.systemInstruction), /УВЕДОМЛЕНИЯ ОРГАНИЗАТОРАМ:\s*настроены/u);
+    await submitSummary(f);
+    await f.call.emit('call.Disconnected');
+    assert.equal(f.requests.length, 3);
+    assert.ok(f.requests.every(request => request.url === settings.VSEMEBEL_TELEGRAM_RELAY_URL));
 });
 
 test('preserves Kore, audio transcription and high-sensitivity 20/100 VAD', async () => {
@@ -369,6 +430,41 @@ test('voice policy permits brief replies and one question without invented actio
     assert.match(policy, /[Нн]е\s+гарантируй\s+обратный\s+звонок/iu);
 });
 
+test('asks name then company after helping, with separate optional questions and no repetition', async () => {
+    const f = fixture();
+    const config = await f.setup();
+    const policy = textParts(config.connectConfig.systemInstruction);
+    const greeting = evaluate(f, 'COMMUNITY_GREETING');
+
+    assert.match(policy, /В содержательном разговоре[^.]*поняла запрос[^.]*дала первый полезный ответ/iu);
+    assert.match(policy, /Подскажите, пожалуйста, как Вас зовут\?/u);
+    assert.match(policy, /Дождись ответа или отказа[^.]*затем отдельно[^.]*компани/iu);
+    assert.match(policy, /Какую компанию Вы представляете\?/u);
+    assert.match(policy, /Не объединяй вопросы об имени и компании в одной реплике/u);
+    assert.match(policy, /Если имя или компания уже названы, повторно их не спрашивай/u);
+    assert.match(policy, /отказ[^.]*частное лицо[^.]*нет компании[^.]*принимай без уточнений/iu);
+    assert.match(policy, /Каждый из этих вопросов задай не более одного раза/u);
+    assert.match(policy, /Не задерживай консультацию ради этих данных/u);
+    assert.match(policy, /Не спрашивай имя и номер в приветствии/u);
+    assert.doesNotMatch(greeting, /как Вас зовут|имя|компани|телефон|номер/iu);
+    assert.match(policy, /client_company[^\n]*если звонящий назвал/iu);
+    assert.match(policy, /Не выдумывай имя или компанию/u);
+    assert.match(policy, /client_company[^.]*пустую строку/iu);
+    assert.match(policy, /По упомянутым брендам[^.]*не делай выводов о компании звонящего/iu);
+});
+
+test('summary tool keeps company optional and preserves the existing required fields', async () => {
+    const config = await fixture().setup();
+    const fn = config.connectConfig.tools.flatMap(tool => tool.functionDeclarations || [])
+        .find(tool => tool.name === 'save_call_summary');
+
+    assert.ok(fn);
+    assert.equal(fn.parameters.properties.client_company.type, 'string');
+    assert.match(fn.parameters.properties.client_company.description, /компани/iu);
+    assert.match(fn.parameters.properties.client_company.description, /со слов/iu);
+    assert.deepEqual(Array.from(fn.parameters.required), ['summary', 'call_goal', 'outcome']);
+});
+
 test('uses a short opening and strictly Russian speech and summary instructions', async () => {
     const f = fixture();
     const config = await f.setup();
@@ -411,6 +507,7 @@ test('knowledge retains free participation and matching without making every too
 
 const summaryArgs = {
     client_name: 'Иван',
+    client_company: 'Мебельная мастерская',
     call_goal: 'Участие в сообществе',
     manager_offer: 'Объяснила регистрацию на портале',
     outcome: 'Консультация завершена',
@@ -418,10 +515,11 @@ const summaryArgs = {
     summary: 'Клиент спросил об участии. Условия участия объяснены.'
 };
 
-async function submitSummary(f) {
+async function submitSummary(f, args = summaryArgs) {
     await f.client.emit('gemini.ToolCall', {
         data: { payload: { functionCalls: [{
-            id: 'summary-test-1', name: 'save_call_summary', args: { ...summaryArgs }
+            id: 'summary-test-1', name: 'save_call_summary',
+            args: typeof args === 'string' ? args : { ...args }
         }] } }
     });
     assert.equal(f.toolResponses.length, 1, 'The summary function must be acknowledged');
@@ -460,12 +558,122 @@ test('acknowledges summary and sends mocked admin/summary reports on disconnect'
     }
     const admin = reports.find(report => !report.text.includes(summaryArgs.summary));
     assert.equal(admin.chat_id, 'test-admin-id');
+    for (const report of reports) {
+        assert.ok(report.text.includes(`<b>Имя:</b> ${summaryArgs.client_name}`));
+        assert.ok(report.text.includes(`<b>Компания:</b> ${summaryArgs.client_company}`));
+    }
     assert.match(admin.text, /42\s*сек/iu);
     assert.match(admin.text, /1\.2500\s*руб/iu);
     assert.equal(f.closed(), 1);
     assert.equal(f.terminated(), 1);
     await f.call.emit('call.Disconnected');
     assert.equal(f.requests.length, 3, 'Duplicate disconnect must not resend reports');
+    assert.equal(f.terminated(), 1);
+});
+
+test('captures company from object and JSON tool arguments and HTML-escapes both report formats', async () => {
+    const company = 'ООО "Мебель & <Стиль>"';
+    for (const useJson of [false, true]) {
+        const f = fixture();
+        await f.setup();
+        const args = { ...summaryArgs, client_company: `  ${company}\n ` };
+        await submitSummary(f, useJson ? JSON.stringify(args) : args);
+        const capturedIndex = f.logs.indexOf('===SUMMARY_FUNCTION_CAPTURED===');
+        const captured = JSON.parse(f.logs[capturedIndex + 1]);
+        assert.equal(captured.client_company, company);
+        assert.equal(captured.client_name, summaryArgs.client_name);
+
+        await f.call.emit('call.Disconnected');
+        assert.equal(f.requests.length, 3);
+        for (const request of f.requests) {
+            const { text, parse_mode } = JSON.parse(request.options.postData);
+            assert.equal(parse_mode, 'HTML');
+            assert.ok(text.includes('<b>Компания:</b> ООО "Мебель &amp; &lt;Стиль&gt;"'));
+            assert.ok(!text.includes(company));
+            assert.ok(text.includes(`<b>Имя:</b> ${summaryArgs.client_name}`));
+        }
+    }
+});
+
+test('missing, empty or whitespace company remains optional and reports as unknown', async () => {
+    for (const company of [undefined, null, '', ' \t\n ']) {
+        const f = fixture();
+        await f.setup();
+        const args = { ...summaryArgs };
+        if (company === undefined) delete args.client_company;
+        else args.client_company = company;
+        await submitSummary(f, args);
+        const capturedIndex = f.logs.indexOf('===SUMMARY_FUNCTION_CAPTURED===');
+        assert.equal(JSON.parse(f.logs[capturedIndex + 1]).client_company, '');
+        await f.call.emit('call.Disconnected');
+        assert.equal(f.requests.length, 3);
+        for (const request of f.requests) {
+            const { text } = JSON.parse(request.options.postData);
+            assert.ok(text.includes('<b>Компания:</b> не указана'));
+            assert.ok(!text.includes(summaryArgs.client_company));
+        }
+        assert.equal(f.terminated(), 1);
+    }
+});
+
+test('explicit summary request asks for optional company without inventing it', async () => {
+    const f = fixture();
+    await f.setup();
+    await f.call.emit('call.Disconnected');
+    const prompt = textParts(f.prompts[1]);
+    assert.match(prompt, /- client_company/u);
+    assert.match(prompt, /client_name и client_company[^.]*со слов[^.]*пустую строку/iu);
+    assert.match(prompt, /Не выдумывай имя или компанию/u);
+    assert.equal(f.requests.length, 0, 'Finalization must still wait for the summary tool');
+
+    await f.client.emit('gemini.ToolCall', {
+        data: { payload: { functionCalls: [{
+            id: 'requested-summary', name: 'save_call_summary', args: { ...summaryArgs }
+        }] } }
+    });
+    assert.equal(f.requests.length, 3);
+    for (const request of f.requests) {
+        assert.ok(JSON.parse(request.options.postData).text.includes(`<b>Компания:</b> ${summaryArgs.client_company}`));
+    }
+    assert.equal(f.closed(), 1);
+    assert.equal(f.terminated(), 1);
+});
+
+test('fallback preserves a structured company even when the summary text is empty', async () => {
+    const f = fixture();
+    await f.setup();
+    await submitSummary(f, { ...summaryArgs, client_company: ' Мебель & <Сервис> ', summary: '' });
+    await f.call.emit('call.Disconnected');
+    assert.equal(f.requests.length, 0);
+    await f.runTimer(evaluate(f, 'SUMMARY_REQUEST_TIMEOUT_MS'));
+    assert.equal(f.requests.length, 3);
+    for (const request of f.requests) {
+        const { text } = JSON.parse(request.options.postData);
+        assert.ok(text.includes('<b>Компания:</b> Мебель &amp; &lt;Сервис&gt;'));
+        assert.ok(text.includes(`<b>Имя:</b> ${summaryArgs.client_name}`));
+    }
+    assert.equal(f.closed(), 1);
+    assert.equal(f.terminated(), 1);
+});
+
+test('fallback leaves company unknown rather than guessing from names or company-like dialogue', async () => {
+    const f = fixture();
+    await f.setup();
+    await f.client.emit('gemini.ServerContent', {
+        data: { payload: {
+            inputTranscription: { text: 'Компания «Мебельная мастерская» есть в каталоге? Я частное лицо, у меня нет компании.' },
+            outputTranscription: { text: 'Откройте каталог участников на сайте Все Мебель.' },
+            turnComplete: true
+        } }
+    });
+    await f.call.emit('call.Disconnected');
+    await f.runTimer(evaluate(f, 'SUMMARY_REQUEST_TIMEOUT_MS'));
+    assert.equal(f.requests.length, 3);
+    for (const request of f.requests) {
+        const { text } = JSON.parse(request.options.postData);
+        assert.ok(text.includes('<b>Компания:</b> не указана'));
+        assert.ok(!text.includes('<b>Компания:</b> Мебельная мастерская'));
+    }
     assert.equal(f.terminated(), 1);
 });
 

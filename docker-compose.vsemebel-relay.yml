@@ -1,0 +1,14 @@
+services:
+  vsemebel-telegram-relay:
+    build:
+      context: ./integrations/telegram_relay
+      dockerfile: Dockerfile
+    env_file:
+      - ${RELAY_ENV_FILE:-./integrations/telegram_relay/.env}
+    environment:
+      RELAY_DB_PATH: /data/relay.sqlite
+    volumes:
+      - ./integrations/telegram_relay/data:/data
+    ports:
+      - "127.0.0.1:8013:8080"
+    restart: unless-stopped

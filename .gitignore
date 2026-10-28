@@ -16,3 +16,6 @@ frontend/node_modules/
 frontend/dist/
 frontend/*.tsbuildinfo
 artifacts/
+integrations/telegram_relay/.env
+integrations/telegram_relay/data/
+integrations/telegram_relay/__pycache__/

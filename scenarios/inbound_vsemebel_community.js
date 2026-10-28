@@ -31,6 +31,15 @@ const COMMUNITY_SYSTEM_INSTRUCTION = `
 ХОД ДИАЛОГА
 - Поздоровайся один раз. После приветствия дождись ответа; не переходи сама к списку вопросов.
 - Если звонящий сразу задал вопрос, ответь по существу, не требуй сначала представиться.
+- В содержательном разговоре, когда поняла запрос и дала первый полезный ответ, в подходящий
+  момент вежливо спроси имя: «Подскажите, пожалуйста, как Вас зовут?»
+  Дождись ответа или отказа и затем отдельно спроси о компании:
+  «Какую компанию Вы представляете?» Не объединяй вопросы об имени и компании в одной реплике.
+- Если имя или компания уже названы, повторно их не спрашивай. Отказ представиться,
+  ответ «частное лицо» или «нет компании» принимай без уточнений и повторных просьб.
+  Каждый из этих вопросов задай не более одного раза.
+  Не задерживай консультацию ради этих данных: если человек продолжает задавать вопросы,
+  сначала помоги; при кратком звонке, отказе продолжать или прощании не начинай сбор данных.
 - Когда роль важна для совета и ещё не ясна, один раз спроси: «Вы производитель,
   дизайнер, поставщик или ищете, кто сделает мебель?» Уже известное повторно не спрашивай.
 - Производителю предложи по ситуации каталог, заявки, коллег, поставщиков, консультации.
@@ -105,10 +114,14 @@ const COMMUNITY_SYSTEM_INSTRUCTION = `
 
 ИТОГИ
 Функция save_call_summary фиксирует итоги, а не создаёт заявку на портале.
-В конце разговора вызови её: client_name (если узнала), client_phone, call_goal (реальный запрос),
+В конце разговора вызови её: client_name (если узнала), client_company (если звонящий назвал),
+client_phone, call_goal (реальный запрос),
 manager_offer (что объяснила), outcome (фактический итог), next_step (кто что должен сделать),
-summary (2–4 предложения). Не выдавай намерение за выполненное действие. Не выдумывай имя,
-согласие на связь, бюджет или обещания. Не произноси названия функции и полей клиенту.
+summary (2–4 предложения). client_company — отдельное необязательное поле: укажи название компании
+только со слов звонящего; если не узнала, человек отказался или у него нет компании, оставь пустую строку.
+По упомянутым брендам, роли, имени или теме запроса не делай выводов о компании звонящего.
+Не выдавай намерение за выполненное действие. Не выдумывай имя или компанию.
+Не выдумывай согласие на связь, бюджет или обещания. Не произноси названия функции и полей клиенту.
 Содержимое текстовых полей итогов заполняй только на русском языке. Имена полей функции
 не переводи: это технический формат, а не произносимый текст.
 
@@ -342,15 +355,21 @@ const AI_PRICE_OUT_AUDIO = 12.00;
 const USD_TO_RUB_RATE = 80;
 const WEBSOCKET_PRICE_PER_MINUTE_RUB = 0.50;
 
-async function loadConfigEntry(name) {
+function readOptionalSecret(name) {
     try {
         if (typeof VoxEngine.getSecretValue === 'function') {
             const value = VoxEngine.getSecretValue(name);
-            if (typeof value === 'string' && value.trim()) return { value };
+            if (typeof value === 'string' && value.trim()) return value;
         }
     } catch (_) {
-        // Lookup errors may contain credentials; fall back without logging them.
+        // Lookup errors may contain credentials; never log them.
     }
+    return '';
+}
+
+async function loadConfigEntry(name) {
+    const value = readOptionalSecret(name);
+    if (value) return { value };
 
     try {
         const entry = await ApplicationStorage.get(name);
@@ -358,6 +377,11 @@ async function loadConfigEntry(name) {
     } catch (_) {
         return { value: undefined };
     }
+}
+
+async function loadTelegramEntry(name) {
+    const value = readOptionalSecret('VSEMEBEL_' + name);
+    return value ? { value } : loadConfigEntry(name);
 }
 
 VoxEngine.addEventListener(AppEvents.CallAlerting, async ({ call }) => {
@@ -370,8 +394,11 @@ VoxEngine.addEventListener(AppEvents.CallAlerting, async ({ call }) => {
     let earlyMediaStarted = false;
 
     let telegramBotToken = '';
+    let telegramRelayUrl = '';
+    let telegramRelaySecret = '';
     let telegramAdminChatIds = [];
     let telegramUserChatIds = [];
+    const reportSessionKey = 'vsemebel-' + Date.now() + '-' + Math.random().toString(36).slice(2);
 
     let callDurationSec = 0;
     let telephonyCostRub = 0;
@@ -403,6 +430,7 @@ VoxEngine.addEventListener(AppEvents.CallAlerting, async ({ call }) => {
 
     const summaryData = {
         client_name: '',
+        client_company: '',
         client_phone: '',
         call_goal: '',
         manager_offer: '',
@@ -708,6 +736,7 @@ VoxEngine.addEventListener(AppEvents.CallAlerting, async ({ call }) => {
         if (summaryReceived && normalizeText(summaryData.summary)) {
             return {
                 client_name: sanitizeForSummary(summaryData.client_name),
+                client_company: normalizeText(summaryData.client_company),
                 client_phone: sanitizeForSummary(summaryData.client_phone || callerPhone),
                 call_goal: clipText(summaryData.call_goal, 350),
                 manager_offer: clipText(summaryData.manager_offer, 350),
@@ -746,6 +775,7 @@ VoxEngine.addEventListener(AppEvents.CallAlerting, async ({ call }) => {
 
         return {
             client_name: sanitizeForSummary(summaryData.client_name || inferredName),
+            client_company: normalizeText(summaryData.client_company),
             client_phone: sanitizeForSummary(summaryData.client_phone || callerPhone),
             call_goal: callGoal,
             manager_offer: managerOffer,
@@ -783,7 +813,7 @@ VoxEngine.addEventListener(AppEvents.CallAlerting, async ({ call }) => {
     };
 
     const sendTelegramMessage = (chatId, htmlText, tag, done) => {
-        if (!telegramBotToken) {
+        if (!telegramBotToken && !telegramRelayUrl) {
             Logger.write(`===TG_SKIP_NO_BOT_TOKEN:${tag}===`);
             done();
             return;
@@ -801,17 +831,31 @@ VoxEngine.addEventListener(AppEvents.CallAlerting, async ({ call }) => {
             return;
         }
 
-        const telegramUrl = `https://api.telegram.org/bot${telegramBotToken}/sendMessage`;
+        const useRelay = Boolean(telegramRelayUrl || telegramRelaySecret);
+        if (useRelay && (!/^https:\/\//i.test(telegramRelayUrl) || !telegramRelaySecret)) {
+            Logger.write(`===TG_SKIP_RELAY_CONFIG:${tag}===`);
+            done();
+            return;
+        }
+        const telegramUrl = useRelay ? telegramRelayUrl : `https://api.telegram.org/bot${telegramBotToken}/sendMessage`;
+        const headers = { 'Content-Type': 'application/json' };
+        const body = {
+            chat_id: chatId,
+            text: trimMessage(htmlText),
+            parse_mode: 'HTML',
+            disable_web_page_preview: true
+        };
+        if (useRelay) {
+            headers.Authorization = 'Bearer ' + telegramRelaySecret;
+            body.message_key = reportSessionKey + ':' + tag + ':' + chatId;
+            delete body.parse_mode;
+            delete body.disable_web_page_preview;
+        }
 
         const options = {
             method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            postData: JSON.stringify({
-                chat_id: chatId,
-                text: trimMessage(htmlText),
-                parse_mode: 'HTML',
-                disable_web_page_preview: true
-            })
+            headers,
+            postData: JSON.stringify(body)
         };
 
         Logger.write(`===TG_SEND_START:${tag} chat=${chatId}===`);
@@ -820,7 +864,8 @@ VoxEngine.addEventListener(AppEvents.CallAlerting, async ({ call }) => {
             telegramUrl,
             (res) => {
                 Logger.write(`===TG_SEND_DONE:${tag} chat=${chatId} code=${res.code}===`);
-                Logger.write(safeString(res.text));
+                const receipt = parseJsonMaybe(res.text);
+                Logger.write(JSON.stringify({ delivered: Boolean(receipt && receipt.ok === true), message_id: receipt && receipt.result && receipt.result.message_id }));
                 done();
             },
             options
@@ -854,6 +899,8 @@ VoxEngine.addEventListener(AppEvents.CallAlerting, async ({ call }) => {
 
         lines.push('<b>ВСЕ | МЕБЕЛЬ — входящий звонок завершён</b>');
         lines.push(`<b>Номер:</b> ${escapeHtml(summary.client_phone || callerPhone || 'неизвестно')}`);
+        lines.push(`<b>Имя:</b> ${escapeHtml(summary.client_name || 'не указано')}`);
+        lines.push(`<b>Компания:</b> ${escapeHtml(summary.client_company || 'не указана')}`);
         lines.push(`<b>Длительность:</b> ${escapeHtml(String(callDurationSec || 0))} сек`);
         lines.push(`<b>Телефония:</b> ${escapeHtml(telephonyCostRub.toFixed(4))} руб`);
         lines.push(`<b>WebSocket:</b> ${escapeHtml(ai.websocketRub.toFixed(4))} руб (${escapeHtml(ai.effectiveWebSocketSec.toFixed(0))} сек)`);
@@ -882,6 +929,7 @@ VoxEngine.addEventListener(AppEvents.CallAlerting, async ({ call }) => {
         lines.push('<b>ВСЕ | МЕБЕЛЬ — итоги входящего звонка</b>');
         lines.push(`<b>Номер:</b> ${escapeHtml(summary.client_phone || callerPhone || 'неизвестно')}`);
         lines.push(`<b>Имя:</b> ${escapeHtml(summary.client_name || 'не указано')}`);
+        lines.push(`<b>Компания:</b> ${escapeHtml(summary.client_company || 'не указана')}`);
         lines.push(`<b>Запрос:</b> ${escapeHtml(summary.call_goal || 'не указано')}`);
         lines.push(`<b>Что предложили:</b> ${escapeHtml(summary.manager_offer || 'не указано')}`);
         lines.push(`<b>Итог:</b> ${escapeHtml(summary.outcome || 'не указано')}`);
@@ -962,6 +1010,7 @@ VoxEngine.addEventListener(AppEvents.CallAlerting, async ({ call }) => {
 Разговор завершен. Теперь обязательно вызови функцию ${SUMMARY_FUNCTION_NAME}.
 Заполни поля:
 - client_name
+- client_company
 - client_phone
 - call_goal
 - manager_offer
@@ -970,6 +1019,9 @@ VoxEngine.addEventListener(AppEvents.CallAlerting, async ({ call }) => {
 - summary
 
 Требования:
+- client_name и client_company: только со слов звонящего; если не узнала или человек отказался, оставь пустую строку.
+- client_company: отдельное необязательное поле; для частного лица или при отсутствии компании оставь пустую строку.
+- Не выдумывай имя или компанию и не определяй компанию по упомянутым брендам, роли или теме запроса.
 - summary: 2-4 предложения, суть звонка и результат.
 - call_goal / manager_offer / outcome / next_step: кратко и предметно.
 - Никакого дополнительного текста в ответ, только function call.
@@ -1063,16 +1115,18 @@ VoxEngine.addEventListener(AppEvents.CallAlerting, async ({ call }) => {
         try {
             const [apiKeyEntry, tgBotEntry, tgAdminEntry, tgUserEntry, tgLegacyChatEntry] = await Promise.all([
                 loadConfigEntry('GEMINI_API_KEY'),
-                loadConfigEntry('TELEGRAM_BOT_TOKEN'),
-                loadConfigEntry('TELEGRAM_CHAT_ID_ADMIN'),
-                loadConfigEntry('TELEGRAM_CHAT_ID_USER'),
-                loadConfigEntry('TELEGRAM_CHAT_ID')
+                loadTelegramEntry('TELEGRAM_BOT_TOKEN'),
+                loadTelegramEntry('TELEGRAM_CHAT_ID_ADMIN'),
+                loadTelegramEntry('TELEGRAM_CHAT_ID_USER'),
+                loadTelegramEntry('TELEGRAM_CHAT_ID')
             ]);
 
             const GEMINI_API_KEY = apiKeyEntry && apiKeyEntry.value;
             const GEMINI_MODEL = 'gemini-3.8-live';
 
             telegramBotToken = safeString(tgBotEntry && tgBotEntry.value).trim();
+            telegramRelayUrl = readOptionalSecret('VSEMEBEL_TELEGRAM_RELAY_URL').trim();
+            telegramRelaySecret = readOptionalSecret('VSEMEBEL_TELEGRAM_RELAY_SECRET').trim();
 
             const adminRaw = safeString((tgAdminEntry && tgAdminEntry.value) || (tgLegacyChatEntry && tgLegacyChatEntry.value));
             const userRaw = safeString(tgUserEntry && tgUserEntry.value);
@@ -1121,6 +1175,7 @@ VoxEngine.addEventListener(AppEvents.CallAlerting, async ({ call }) => {
                                     type: 'object',
                                     properties: {
                                         client_name: { type: 'string', description: 'Имя клиента' },
+                                        client_company: { type: 'string', description: 'Компания клиента только со слов звонящего; необязательно, пустая строка, если неизвестна, отказ или компании нет' },
                                         client_phone: { type: 'string', description: 'Подтвержденный номер телефона клиента' },
                                         call_goal: { type: 'string', description: 'Что хотел клиент' },
                                         manager_offer: { type: 'string', description: 'Что предложил менеджер' },
@@ -1139,7 +1194,7 @@ VoxEngine.addEventListener(AppEvents.CallAlerting, async ({ call }) => {
                     parts: [
                         {
                             text: COMMUNITY_SYSTEM_INSTRUCTION + '\n' + buildCommunityDateContext(Date.now()) +
-                                `\nУВЕДОМЛЕНИЯ ОРГАНИЗАТОРАМ: ${telegramBotToken && (telegramAdminChatIds.length || telegramUserChatIds.length) ? 'настроены; обращение можно включить в итоги, без гарантии обратного звонка' : 'не настроены; предлагай прямые контакты организатора'}.` +
+                                `\nУВЕДОМЛЕНИЯ ОРГАНИЗАТОРАМ: ${((telegramRelayUrl && telegramRelaySecret) || telegramBotToken) && (telegramAdminChatIds.length || telegramUserChatIds.length) ? 'настроены; обращение можно включить в итоги, без гарантии обратного звонка' : 'не настроены; предлагай прямые контакты организатора'}.` +
                                 `\nТЕХНИЧЕСКИЙ КОНТЕКСТ: номер звонящего ${callerPhone.replace(/[^+\d]/g, '') || 'неизвестен'}. Используй для итогов, не произноси в приветствии и не зачитывай без необходимости.`
                         }
                     ]
@@ -1201,6 +1256,7 @@ VoxEngine.addEventListener(AppEvents.CallAlerting, async ({ call }) => {
 
                     if (fname === SUMMARY_FUNCTION_NAME) {
                         summaryData.client_name = normalizeText(fargs.client_name);
+                        summaryData.client_company = normalizeText(fargs.client_company);
                         summaryData.client_phone = normalizeText(fargs.client_phone || callerPhone);
                         summaryData.call_goal = normalizeText(fargs.call_goal);
                         summaryData.manager_offer = normalizeText(fargs.manager_offer);
