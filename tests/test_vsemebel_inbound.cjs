@@ -28,7 +28,7 @@ function eventTarget() {
     };
 }
 
-function fixture(nowMs = DEFAULT_NOW, storageOverrides = {}) {
+function fixture(nowMs = DEFAULT_NOW, storageOverrides = {}, getSecretValue) {
     const app = eventTarget();
     const call = eventTarget();
     const client = eventTarget();
@@ -39,6 +39,7 @@ function fixture(nowMs = DEFAULT_NOW, storageOverrides = {}) {
     const logs = [];
     const loadedModules = [];
     const storageKeys = [];
+    const secretKeys = [];
     const timers = new Map();
     let timerId = 0;
     let answered = 0;
@@ -133,6 +134,12 @@ function fixture(nowMs = DEFAULT_NOW, storageOverrides = {}) {
         ApplicationStorage,
         Gemini,
         VoxEngine: Object.assign(app, {
+            ...(getSecretValue === undefined ? {} : {
+                getSecretValue(name) {
+                    secretKeys.push(name);
+                    return getSecretValue(name);
+                }
+            }),
             callPSTN: forbidDial,
             callSIP: forbidDial,
             callUser: forbidDial,
@@ -155,7 +162,7 @@ function fixture(nowMs = DEFAULT_NOW, storageOverrides = {}) {
     vm.runInContext(source, context, { filename: scenarioPath, timeout: 1000 });
 
     return {
-        context, app, call, client, configs, prompts, requests, loadedModules, storageKeys, toolResponses,
+        context, app, call, client, configs, prompts, requests, logs, loadedModules, storageKeys, secretKeys, toolResponses,
         outboundAttempts: () => outboundAttempts,
         closed: () => closed,
         terminated: () => terminated,
@@ -210,6 +217,73 @@ test('registers an inbound handler and uses storage credentials without outbound
     assert.equal(evaluate(f, 'ANSWER_DELAY_MS'), 5000, 'Preserve the pre-answer delay');
     assert.equal(f.outboundAttempts(), 0);
     assert.doesNotMatch(source, /\bVoxEngine\s*\.\s*(?:callPSTN|callSIP|callUser)\s*\(/);
+    assert.doesNotMatch(source, /[0-9]{7,12}:[A-Za-z0-9_-]{25,}/, 'Telegram tokens must not be embedded');
+    assert.doesNotMatch(source, /AIza[0-9A-Za-z_-]{20,}/, 'Google API keys must not be embedded');
+});
+
+test('uses synchronous application Secrets with empty KVS and prefers them over populated KVS', async () => {
+    const secrets = {
+        GEMINI_API_KEY: 'secret-test-gemini-key',
+        TELEGRAM_BOT_TOKEN: 'secret-test-telegram-token',
+        TELEGRAM_CHAT_ID_ADMIN: 'secret-test-admin-id',
+        TELEGRAM_CHAT_ID_USER: 'secret-test-user-id',
+        TELEGRAM_CHAT_ID: 'secret-test-legacy-id'
+    };
+    const emptyStorage = Object.fromEntries(Object.keys(secrets).map(key => [key, '']));
+    for (const storage of [emptyStorage, {}]) {
+        const f = fixture(DEFAULT_NOW, storage, name => secrets[name]);
+        const config = await f.setup();
+        assert.equal(config.apiKey, secrets.GEMINI_API_KEY);
+        assert.deepEqual(f.secretKeys, Object.keys(secrets));
+        assert.deepEqual(f.storageKeys, [], 'Present Secrets must not read KVS');
+        for (const value of Object.values(secrets)) {
+            assert.ok(!f.logs.join('\n').includes(value), 'Config loading must not log values');
+        }
+        await submitSummary(f);
+        await f.call.emit('call.Disconnected', { duration: 42 });
+        assert.equal(f.requests.length, 3);
+        for (const request of f.requests) {
+            assert.equal(request.url, `https://api.telegram.org/bot${secrets.TELEGRAM_BOT_TOKEN}/sendMessage`);
+        }
+        const recipients = f.requests.map(request => JSON.parse(request.options.postData).chat_id);
+        assert.deepEqual([...new Set(recipients)].sort(), [secrets.TELEGRAM_CHAT_ID_ADMIN, secrets.TELEGRAM_CHAT_ID_USER]);
+        assert.equal(f.terminated(), 1);
+    }
+});
+
+test('falls back per key to KVS for undefined, empty or whitespace-only Secrets', async () => {
+    for (const missingValue of [undefined, '', ' \t ']) {
+        const f = fixture(DEFAULT_NOW, {}, name => name === 'GEMINI_API_KEY' ? 'secret-test-gemini-key' : missingValue);
+        const config = await f.setup();
+        assert.equal(config.apiKey, 'secret-test-gemini-key');
+        assert.deepEqual(f.storageKeys, [
+            'TELEGRAM_BOT_TOKEN', 'TELEGRAM_CHAT_ID_ADMIN', 'TELEGRAM_CHAT_ID_USER', 'TELEGRAM_CHAT_ID'
+        ]);
+        assert.match(textParts(config.connectConfig.systemInstruction), /УВЕДОМЛЕНИЯ ОРГАНИЗАТОРАМ:\s*настроены/iu);
+    }
+});
+
+test('falls back to KVS if the Secrets API throws without logging the error', async () => {
+    const errorText = 'Secret lookup failed with secret-test-credential';
+    const f = fixture(DEFAULT_NOW, {}, () => { throw new Error(errorText); });
+    const config = await f.setup();
+    assert.equal(config.apiKey, 'test-gemini-key');
+    assert.deepEqual(f.storageKeys, f.secretKeys);
+    assert.equal(f.storageKeys.length, 5);
+    assert.ok(!f.logs.join('\n').includes(errorText));
+    assert.ok(!f.logs.join('\n').includes('test-gemini-key'));
+    assert.ok(!f.logs.join('\n').includes('test-telegram-token'));
+});
+
+test('config loader preserves the value entry shape and suppresses KVS lookup errors', async () => {
+    const f = fixture(DEFAULT_NOW, {}, () => undefined);
+    assert.deepEqual({ ...await evaluate(f, "loadConfigEntry('GEMINI_API_KEY')") }, { value: 'test-gemini-key' });
+    const errorText = 'KVS lookup failed with storage-test-credential';
+    f.context.ApplicationStorage.get = async () => { throw new Error(errorText); };
+    assert.deepEqual({ ...await evaluate(f, "loadConfigEntry('GEMINI_API_KEY')") }, { value: undefined });
+    assert.ok(!f.logs.join('\n').includes(errorText));
+    assert.match(source, /let telegramBotToken = '';/);
+    assert.doesNotMatch(source, /\b\d{6,}:[A-Za-z0-9_-]{20,}\b/);
 });
 
 test('preserves Kore, audio transcription and high-sensitivity 20/100 VAD', async () => {

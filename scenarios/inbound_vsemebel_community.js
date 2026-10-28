@@ -330,6 +330,24 @@ const AI_PRICE_OUT_AUDIO = 12.00;
 const USD_TO_RUB_RATE = 80;
 const WEBSOCKET_PRICE_PER_MINUTE_RUB = 0.50;
 
+async function loadConfigEntry(name) {
+    try {
+        if (typeof VoxEngine.getSecretValue === 'function') {
+            const value = VoxEngine.getSecretValue(name);
+            if (typeof value === 'string' && value.trim()) return { value };
+        }
+    } catch (_) {
+        // Lookup errors may contain credentials; fall back without logging them.
+    }
+
+    try {
+        const entry = await ApplicationStorage.get(name);
+        return { value: entry && entry.value };
+    } catch (_) {
+        return { value: undefined };
+    }
+}
+
 VoxEngine.addEventListener(AppEvents.CallAlerting, async ({ call }) => {
     let geminiLiveAPIClient;
     let isSessionTerminated = false;
@@ -339,7 +357,7 @@ VoxEngine.addEventListener(AppEvents.CallAlerting, async ({ call }) => {
     let summaryWaitDone = null;
     let earlyMediaStarted = false;
 
-    let telegramBotToken = '8288947109:AAHO5MMOKQ9gbElzZikzPw-18seJGhjr588';
+    let telegramBotToken = '';
     let telegramAdminChatIds = [];
     let telegramUserChatIds = [];
 
@@ -1032,11 +1050,11 @@ VoxEngine.addEventListener(AppEvents.CallAlerting, async ({ call }) => {
     const startGeminiSession = async () => {
         try {
             const [apiKeyEntry, tgBotEntry, tgAdminEntry, tgUserEntry, tgLegacyChatEntry] = await Promise.all([
-                ApplicationStorage.get('GEMINI_API_KEY'),
-                ApplicationStorage.get('TELEGRAM_BOT_TOKEN'),
-                ApplicationStorage.get('TELEGRAM_CHAT_ID_ADMIN'),
-                ApplicationStorage.get('TELEGRAM_CHAT_ID_USER'),
-                ApplicationStorage.get('TELEGRAM_CHAT_ID')
+                loadConfigEntry('GEMINI_API_KEY'),
+                loadConfigEntry('TELEGRAM_BOT_TOKEN'),
+                loadConfigEntry('TELEGRAM_CHAT_ID_ADMIN'),
+                loadConfigEntry('TELEGRAM_CHAT_ID_USER'),
+                loadConfigEntry('TELEGRAM_CHAT_ID')
             ]);
 
             const GEMINI_API_KEY = apiKeyEntry && apiKeyEntry.value;
@@ -1051,18 +1069,9 @@ VoxEngine.addEventListener(AppEvents.CallAlerting, async ({ call }) => {
             telegramUserChatIds = parseChatIdList(userRaw);
 
             Logger.write('===CONFIG_LOADED===');
-            Logger.write(
-                JSON.stringify({
-                    hasGeminiKey: Boolean(GEMINI_API_KEY),
-                    hasTelegramToken: Boolean(telegramBotToken),
-                    adminChats: telegramAdminChatIds,
-                    userChats: telegramUserChatIds,
-                    callerPhone
-                })
-            );
 
             if (!GEMINI_API_KEY) {
-                Logger.write('===NO_GEMINI_API_KEY_IN_APPLICATION_STORAGE===');
+                Logger.write('===NO_GEMINI_API_KEY===');
                 finalizeSession('no_gemini_key');
                 return;
             }
@@ -1294,7 +1303,6 @@ VoxEngine.addEventListener(AppEvents.CallAlerting, async ({ call }) => {
             });
         } catch (error) {
             Logger.write('===SOMETHING_WENT_WRONG===');
-            Logger.write(String(error));
             finalizeSession('start_session_error');
         }
     };
