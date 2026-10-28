@@ -379,7 +379,6 @@ test('uses a short opening and strictly Russian speech and summary instructions'
     assert.equal((greeting.match(/\?/gu) || []).length, 1);
     assert.match(greeting, /Чем могу помочь\?/u);
     assert.match(policy, /Говори только на русском языке/u);
-    assert.match(policy, /Даже если звонящий говорит на другом языке/u);
     assert.match(policy, /текстовых полей итогов заполняй только на русском/u);
     assert.doesNotMatch(policy, /можешь ответить на его языке/u);
     assert.match(policy, /быстрее обычного разговорного темпа/u);
@@ -387,6 +386,18 @@ test('uses a short opening and strictly Russian speech and summary instructions'
     assert.equal(config.connectConfig.speechConfig.speakingRate, undefined);
     assert.equal(config.connectConfig.speechConfig.speed, undefined);
     assert.equal(config.connectConfig.speechConfig.languageCode, undefined);
+});
+
+test('does not turn a foreign-looking ASR fragment into an input language gate', async () => {
+    const config = await fixture().setup();
+    const policy = textParts(config.connectConfig.systemInstruction);
+
+    assert.match(policy, /Говори только на русском языке/u);
+    assert.match(policy, /Ограничение языка относится только к твоим ответам/u);
+    assert.match(policy, /учитывай смысл и историю разговора/iu);
+    assert.match(policy, /не требуй от собеседника менять язык/iu);
+    assert.match(policy, /Повторите громче, пожалуйста/u);
+    assert.doesNotMatch(policy, /(?:задайте|повторите)[^.\n]{0,50}вопрос по-русски/iu);
 });
 
 test('knowledge retains free participation and matching without making every tool free', () => {
