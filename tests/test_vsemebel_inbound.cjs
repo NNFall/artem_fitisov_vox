@@ -362,11 +362,31 @@ for (const [name, instant, day, timing] of [
 
 test('voice policy permits brief replies and one question without invented actions', () => {
     const policy = evaluate(fixture(), 'COMMUNITY_SYSTEM_INSTRUCTION');
-    assert.match(policy, /1\s*[–-]\s*3\s+коротких\s+предложен/iu);
+    assert.match(policy, /1\s*[–-]\s*2\s+коротких\s+предложен/iu);
     assert.match(policy, /[Вв]опросы\s+задавай\s+по\s+одному/iu);
     assert.match(policy, /[Нн]е\s+обещай\s+отправить\s+ссылк/iu);
     assert.match(policy, /[Нн]е\s+говори[^.]{0,100}зарегистрировала/iu);
     assert.match(policy, /[Нн]е\s+гарантируй\s+обратный\s+звонок/iu);
+});
+
+test('uses a short opening and strictly Russian speech and summary instructions', async () => {
+    const f = fixture();
+    const config = await f.setup();
+    const greeting = evaluate(f, 'COMMUNITY_GREETING');
+    const policy = textParts(config.connectConfig.systemInstruction);
+
+    assert.ok(greeting.trim().split(/\s+/u).length <= 20, 'Keep the opening brief');
+    assert.equal((greeting.match(/\?/gu) || []).length, 1);
+    assert.match(greeting, /Чем могу помочь\?/u);
+    assert.match(policy, /Говори только на русском языке/u);
+    assert.match(policy, /Даже если звонящий говорит на другом языке/u);
+    assert.match(policy, /текстовых полей итогов заполняй только на русском/u);
+    assert.doesNotMatch(policy, /можешь ответить на его языке/u);
+    assert.match(policy, /быстрее обычного разговорного темпа/u);
+    assert.match(policy, /чёткую дикцию/u);
+    assert.equal(config.connectConfig.speechConfig.speakingRate, undefined);
+    assert.equal(config.connectConfig.speechConfig.speed, undefined);
+    assert.equal(config.connectConfig.speechConfig.languageCode, undefined);
 });
 
 test('knowledge retains free participation and matching without making every tool free', () => {
