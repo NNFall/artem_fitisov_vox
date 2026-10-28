@@ -6,6 +6,7 @@
 
 - `ArtemFetGem2,5.js` — основной рабочий сценарий Just Wood
 - `defvoxwork13.03.js` — ранняя рабочая версия сценария
+- `scenarios/inbound_vsemebel_community.js` — отдельный входящий консультант сообщества «ВСЕ | МЕБЕЛЬ»; [подключение и проверки](docs/vsemebel-community-inbound.md)
 - `scenarios/outbound_gemini_test.js` — тестовый сценарий исходящего обзвона через Voximplant + Gemini
 - `scenarios/outbound_gemini_server_edition.js` — исходящий сценарий с отправкой итогов на backend
 - `backend/` — FastAPI + SQLite backend для хранения звонков, записей, отчетов и статистики

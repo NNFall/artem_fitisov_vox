@@ -12,6 +12,7 @@ class VoximplantScenarioSyntaxTest(unittest.TestCase):
 
         repo_root = Path(__file__).resolve().parents[1]
         scenario_paths = [
+            repo_root / "scenarios" / "inbound_vsemebel_community.js",
             repo_root / "scenarios" / "outbound_gemini_server_edition.js",
             repo_root / "scenarios" / "outbound_gemini_web_edition.js",
             repo_root / "scenarios" / "inbound_gemini_callback_server_edition.js",
